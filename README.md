@@ -269,10 +269,26 @@ cron-job.org (平日, 台灣時間)
                                           09:02 開盤 / 09:05 區間 / 每 10 秒輪詢到 13:31, 狀態寫 HF db/orb/live.json, 收盤後當天檔案寫 db/orb/live/<date>/
   21:00 → .github/workflows/nightly.yml  cloud_nightly.py: 下載 db/orb/history/*.parquet → refresh (D1 6 個月 + M1 2 個月) → build_history.py (增量)
   08:10 → nightly.yml (補跑)              → export_web.py (新日子 days/<date>.json + index.json) → 上傳 db/orb/history/ 與 db/orb/web/
+                                          → export_live.py (db/orb/live/<date>/ 實盤檔 × 同日回測 → web/live_index.json + web/live/<date>.json)
 網頁: GitHub Pages (repo 根目錄 index.html → web/index.html, CNAME = fade.just1stock.com)
   web/index.html 在 localhost 時讀本機 webapp.py 的 /api, 其他網域讀 HF db/orb/web/ 與 db/orb/live.json (盤中每 20 秒更新「今日即時」)
 ```
 - 一次性設定: (1) GitHub repo Secrets 加 `HF_TOKEN` (HF 寫入權限)；(2) 本機 `python3 scripts/export_web.py --all` 後 `HF_TOKEN=... python3 scripts/cloud_nightly.py --seed` 上傳歷史與 1,654 天網頁檔 (約 225 MB)；(3) `python3 scripts/setup_cronjob.py --env-file <.env> --test` 建立 cron-job.org 三個排程 (需 `CRONJOB_API_KEY` 與 `GH_DISPATCH_TOKEN`: GitHub fine-grained token 只選 quant_trading_v2、Actions: Read and write)；(4) GoDaddy CNAME `fade` → `raywu918daytrade.github.io` (2026-10-27 已設定)。
 - 手動補跑: GitHub → Actions → Live signals / Nightly history update → Run workflow。
+
+### 實盤紀錄 (2026-10-27) — `scripts/export_live.py` + 網頁「實盤紀錄」分頁
+每天把實盤訊號 (live.yml 收盤後上傳的 `db/orb/live/<date>/<date>_{trades,events,watch,excluded,cand}.csv`) 和同日回測 (`orb_history/trades.parquet`) 逐檔對齊。
+實盤放空價 = 偵測到跌破時的最新成交價 (每 10 秒輪詢), 回測 = 區間低 (1 分 K), 兩者差距就是延遲與滑價。
+```bash
+python3 scripts/export_live.py                     # 讀 HF 實盤檔 → data/web_export/live_index.json + live/<date>.json (只寫本機)
+python3 scripts/export_live.py --src signals       # 讀本機資料夾 (orb_live.py run 的輸出; 檔名 <date>_trades.csv 等)
+python3 scripts/webapp.py --live-dir signals       # 本機網頁: /api/live_index、/api/live_day?date= 每次請求即時對齊 (預設就是 signals/)
+```
+- `cloud_nightly.py` 每晚自動做 (第 5 步): 回測已就緒的日子沿用上次的 `live_index.json`, 只重算新日子與「回測尚未更新」的日子 (分 K 還沒到時實盤先列出, 回測補上後自動重算)；改了對齊邏輯用 `--rebuild-live` 全部重算。沒有新交易日時也會上傳實盤紀錄；這一步失敗只印錯誤, 不影響回測更新。
+- `live_index.json` 每日: 實盤 / 回測筆數、平均每筆報酬、損益 (元, 含成本)、差額、兩邊都有的筆數與各自平均、平均進場差 (檔)、累計曲線 (`cum_live` / `cum_bt`; 回測還沒更新的日子 `cum_bt` 為空, 總差額只算兩邊都有的日子)。
+- `live/<date>.json` 逐檔: 實盤放空時間 (到秒) / 價、回測進場時間 (分 K) / 價、出場方式 / 回補價 / 報酬, 以及事件紀錄與實盤 09:05 剔除清單。**差幾檔** 用 `orb_live.tick_size` 逐檔累加 (跨價位級距也對), 正 = 實盤較不利 (進場: 實盤放空價較低；出場: 實盤回補價較高)。
+- 只有一邊有的股票照列並標原因: 只在實盤 → 回測未跌破 / 回測已滿 10 檔 / 回測剔除 (原因) / 不在回測監看名單 / 回測判定不交易 / 回測尚未更新；只在回測 → 實盤跌破但已滿 10 檔 (FULL 事件) / 實盤剔除 (原因) / 實盤監看中但 12:00 前未偵測到跌破 / 不在實盤監看名單 (開盤價、跳空、當沖資格不同) / 實盤判定不交易。
+- 盤中程式中斷沒有 `trades.csv` 時, 用 `events.csv` 的 SHORT / STOP / CLOSE 重建 (標「實盤未結算」)。
+- 網頁「實盤紀錄」分頁 (網址 `#rec` 或 `#rec/<日期>`): 累計損益 實盤 vs 回測、每日表、點某天看逐檔對照 (點代號跳到該股回測 K 線)。還沒有任何實盤資料時顯示說明文字。靜態模式讀 `<data>/live_index.json` 與 `<data>/live/<date>.json`, 可用 `?data=<網址>` 指向本機匯出測試。
 - 盤中只產生訊號、不下單。live.yml 跑約 4.7 小時 (public repo 免費)。MIS 回傳日期不是今天 (假日) 會寫「非交易日」後正常結束。
 - 部署完成 (2026-10-27): Secrets `HF_TOKEN` = HF.env 的 `HF_TOKEN_1` (raywu918daytrade, fine-grained 有 daytrade dataset 寫入權；daytrade.env 的 HF_TOKEN 屬 raywu918python, 沒有寫入權)。cron-job.org job 8734280 (live 08:50)、8734281 (nightly 21:00)、8734282 (nightly 08:10), 由 ray.env 的 `CORN_JOB_TOKEN_DAY_TRADE` 與 `GITHUB_DAY_TRADE` 建立。`scripts/hf_check.py <env 檔>` 可檢查 HF token 的帳號與寫入權 (不印值)。

@@ -64,10 +64,28 @@
   .key i { display: inline-block; width: 16px; height: 0; border-top: 2px dashed; vertical-align: middle; margin-right: 4px; }
   .empty { color: var(--ink3); padding: 16px 4px; }
   .hint { color: var(--ink3); font-size: 12px; margin-top: 8px; }
+  .tabs { display: flex; gap: 2px; margin: 0 20px 12px; border-bottom: 1px solid var(--line); }
+  .tabs button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 6px 14px; font-size: 14px; color: var(--ink2); }
+  .tabs button:hover { background: none; color: var(--ink); } .tabs button.on { color: var(--ink); border-bottom-color: var(--blue); font-weight: 600; }
+  .recstats { margin: 0 20px 10px; }
+  #receq { height: 200px; }
+  #tab-rec .eqhead { flex-wrap: wrap; gap: 2px 12px; } .eqkey { display: inline-flex; gap: 12px; white-space: nowrap; } .eqkey i { display: inline-block; width: 14px; height: 0; border-top: 2px solid; vertical-align: middle; margin-right: 4px; }
+  .reclayout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; padding: 14px 20px 30px; }
+  .tw { overflow-x: auto; } #recdays { max-height: 290px; overflow-y: auto; }
+  #recdays thead th { position: sticky; top: 0; background: var(--panel); }
+  table.dl th:nth-child(2), table.dl td:nth-child(2) { text-align: right; }
+  table.dl td:last-child, table.dl th:last-child, table.cmp td:last-child, table.cmp th:last-child { text-align: left; white-space: normal; min-width: 120px; color: var(--ink2); }
+  table.cmp th.grp { text-align: center; color: var(--ink2); border-bottom: none; padding-bottom: 0; }
+  table.cmp td.sep, table.cmp th.sep { border-left: 1px solid var(--line); }
+  table.cmp tbody tr { cursor: default; } table.cmp td .sub { font-size: 11.5px; color: var(--ink3); }
+  tr.only-live td { background: #f3f8ff; } tr.only-bt td { background: #faf9f6; color: var(--ink3); }
+  .recnote { color: var(--ink2); font-size: 12.5px; margin: 8px 0 0; }
+  a.sid { color: var(--blue); text-decoration: none; } a.sid:hover { text-decoration: underline; }
   @media (max-width: 1150px) { .grid2 { grid-template-columns: 1fr; } }
   @media (max-width: 760px) {
     .layout { grid-template-columns: 1fr; padding: 12px; } aside { position: static; max-height: 300px; }
     .eqwrap { margin: 0 12px; } header { padding: 12px; } #intra { height: 340px; }
+    .tabs, .recstats { margin-left: 12px; margin-right: 12px; } .reclayout { padding: 12px; }
   }
 </style>
 </head>
@@ -81,6 +99,8 @@
   <div class="livehead"><h2>今日即時</h2><span id="livephase" class="phase"></span><span id="liveinfo" class="sub"></span><span id="liveupd" class="sub" style="margin-left:auto"></span></div>
   <div id="livebody" class="sub">載入中…</div>
 </section>
+<nav class="tabs"><button data-tab="bt" class="on">歷史回測</button><button data-tab="rec">實盤紀錄</button></nav>
+<div id="tab-bt">
 <div class="eqwrap">
   <div class="eqhead"><span>資金曲線 (固定 300 萬、每檔額度 30 萬、整數張、不複利)　點曲線跳到該日</span><span id="eqval"></span></div>
   <div id="eq"></div><div id="ddc"></div>
@@ -115,6 +135,28 @@
       </div>
     </div>
   </main>
+</div>
+</div>
+<div id="tab-rec" hidden>
+  <div class="chips recstats" id="recstats"></div>
+  <div id="recempty" class="empty" style="margin: 0 20px" hidden></div>
+  <div id="recmain">
+    <div class="eqwrap">
+      <div class="eqhead"><span>累計損益：實盤 vs 同日回測 (只算有實盤檔的日子；回測還沒更新的日子回測線不前進)　點曲線跳到該日</span>
+        <span class="eqkey"><span><i style="border-color:var(--blue)"></i>實盤</span><span><i style="border-color:var(--orange)"></i>回測</span><span id="receqval"></span></span></div>
+      <div id="receq"></div>
+    </div>
+    <div class="reclayout">
+      <div class="card"><h3>每日 (新到舊)</h3><div class="tw" id="recdays"></div>
+        <div class="hint">實盤放空價 = 偵測到跌破時的最新成交價 (每 10 秒輪詢)；回測 = 區間低 (1 分 K)。兩者差距就是延遲與滑價。</div></div>
+      <div class="card"><div class="dayhead"><h2 id="rectitle">逐檔對照</h2><div class="chips" id="recchips"></div></div>
+        <div class="tw" id="recrows"></div>
+        <div class="hint">差 (檔) 用台股升降單位計，正 = 實盤較不利 (進場: 實盤放空價較低；出場: 實盤回補價較高)。點代號看該股回測 K 線。</div>
+        <details id="recevw"><summary id="recevs">實盤事件紀錄</summary><div id="recev" class="sub"></div></details>
+        <details id="recexw"><summary id="recexs">實盤 09:05 剔除</summary><div id="recex" class="sub"></div></details>
+      </div>
+    </div>
+  </div>
 </div>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -154,10 +196,15 @@ const dC = daily.addCandlestickSeries({ upColor: C.up, downColor: C.dn, wickUpCo
 const dV = daily.addHistogramSeries({ priceFormat: { type: "volume" }, priceScaleId: "", lastValueVisible: false, priceLineVisible: false });
 dV.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
 let plines = [];
-new ResizeObserver(() => {
-  for (const [c, el] of [[eq, "eq"], [dd, "ddc"], [intraday, "intra"], [daily, "daily"]]) c.applyOptions({ width: $(el).clientWidth, height: $(el).clientHeight });
-  eq.timeScale().fitContent(); dd.timeScale().fitContent(); fitIntra(); daily.timeScale().fitContent();
-}).observe(document.body);
+const recEq = LightweightCharts.createChart($("receq"), { ...base, timeScale: { ...base.timeScale, minBarSpacing: 0.01 }, handleScroll: false, handleScale: false });
+const wan = { type: "custom", formatter: (v) => (v >= 0 ? "+" : "") + v.toFixed(1) + " 萬" };
+const recL = recEq.addLineSeries({ color: C.blue, lineWidth: 2, priceLineVisible: false, priceFormat: wan });
+const recB = recEq.addLineSeries({ color: C.orange, lineWidth: 2, priceLineVisible: false, priceFormat: wan });
+function resizeCharts() {
+  for (const [c, el] of [[eq, "eq"], [dd, "ddc"], [intraday, "intra"], [daily, "daily"], [recEq, "receq"]]) if ($(el).clientWidth) c.applyOptions({ width: $(el).clientWidth, height: $(el).clientHeight });
+  eq.timeScale().fitContent(); dd.timeScale().fitContent(); fitIntra(); daily.timeScale().fitContent(); recEq.timeScale().fitContent();
+}
+new ResizeObserver(resizeCharts).observe(document.body);
 
 let IBARS = {}, DBARS = {}, NIB = 0;
 const fitIntra = () => { if (NIB) intraday.timeScale().setVisibleLogicalRange({ from: -10, to: NIB + 14 }); };
@@ -187,6 +234,8 @@ const DS = {
     return { intraday: b.i || [], daily: b.d || [], info: b.info || {} };
   },
   live: () => getJSON(LIVE_URL + (LIVE_URL.includes("?") ? "&" : "?") + "t=" + Date.now()),
+  recIndex: () => LOCAL ? getJSON("/api/live_index") : getJSON(DATA + "live_index.json?t=" + Date.now()),
+  recDay: (d) => LOCAL ? getJSON(`/api/live_day?date=${d}`) : getJSON(DATA + `live/${d}.json?t=` + Date.now()),
 };
 async function init() {
   const j = await DS.days();
@@ -203,7 +252,8 @@ async function init() {
   $("pick").min = DAYS[0].date; $("pick").max = DAYS[DAYS.length - 1].date;
   const [hd, hs] = decodeURIComponent(location.hash.slice(1)).split("/");
   const last = [...DAYS].reverse().find((d) => d.n_trades > 0);
-  loadDay(BYDATE[hd] ? hd : last.date, hs || null);
+  if (hd === "rec") { loadDay(last.date, null, false, true); showTab("rec", hs || null); }
+  else loadDay(BYDATE[hd] ? hd : last.date, hs || null);
 }
 
 function renderDayList(month) {
@@ -219,7 +269,7 @@ function renderDayList(month) {
   const sel = $("daylist").querySelector(".sel"); if (sel) sel.scrollIntoView({ block: "nearest" });
 }
 
-async function loadDay(date, sid = null, fromChart = false) {
+async function loadDay(date, sid = null, fromChart = false, quiet = false) {
   cur.date = date; $("month").value = date.slice(0, 7); $("pick").value = date;
   renderDayList(date.slice(0, 7));
   const j = await DS.day(date);
@@ -244,14 +294,14 @@ async function loadDay(date, sid = null, fromChart = false) {
   cur.rows = [...$("trades").querySelectorAll("tbody tr"), ...$("others").querySelectorAll("tbody tr")];
   cur.rows.forEach((el) => el.onclick = () => loadStock(el.dataset.sid));
   const first = sid || (tr[0] && tr[0].stock_id) || (ot[0] && ot[0].stock_id);
-  if (first) { if (!tr.find((r) => r.stock_id === first)) $("othwrap").open = true; loadStock(first); }
-  else { clearCharts(); history.replaceState(null, "", `#${date}`); }
+  if (first) { if (!tr.find((r) => r.stock_id === first)) $("othwrap").open = true; loadStock(first, quiet); }
+  else { clearCharts(); if (!quiet) history.replaceState(null, "", `#${date}`); }
 }
 
 function clearCharts() { iC.setData([]); iV.setData([]); dC.setData([]); dV.setData([]); $("ctitle").textContent = "K 線"; $("lg1").innerHTML = $("lg2").innerHTML = ""; }
 
-async function loadStock(sid) {
-  cur.sid = sid; history.replaceState(null, "", `#${cur.date}/${sid}`);
+async function loadStock(sid, quiet = false) {
+  cur.sid = sid; if (!quiet) history.replaceState(null, "", `#${cur.date}/${sid}`);
   cur.rows.forEach((el) => el.classList.toggle("sel", el.dataset.sid === sid));
   const j = await DS.bars(cur.date, sid);
   const f = j.info || {};
@@ -294,7 +344,7 @@ $("month").onchange = () => { const m = $("month").value; const d = DAYS.find((x
 $("pick").onchange = () => { const v = $("pick").value; const d = DAYS.find((x) => x.date >= v); if (d) loadDay(d.date); };
 $("onlytr").onchange = () => renderDayList($("month").value);
 document.addEventListener("keydown", (e) => {
-  if (["INPUT", "SELECT"].includes(document.activeElement.tagName)) return;
+  if (["INPUT", "SELECT"].includes(document.activeElement.tagName) || TAB !== "bt") return;
   if (e.key === "ArrowLeft") { stepDay(-1); e.preventDefault(); }
   if (e.key === "ArrowRight") { stepDay(1); e.preventDefault(); }
   if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -339,9 +389,87 @@ async function loadLive() {
 
 window.addEventListener("hashchange", () => {
   const [hd, hs] = decodeURIComponent(location.hash.slice(1)).split("/");
+  if (hd === "rec") { if (TAB !== "rec" || (hs && hs !== REC.date)) showTab("rec", hs || null); return; }
+  if (TAB !== "bt") showTab("bt");
   if (hd && BYDATE[hd] && hd !== cur.date) loadDay(hd, hs || null);
   else if (hs && hs !== cur.sid) loadStock(hs);
 });
+
+// ---------- 實盤紀錄 ----------
+let TAB = "bt";
+const REC = { idx: null, date: null, by: {} };
+document.querySelectorAll(".tabs button").forEach((b) => b.onclick = () => showTab(b.dataset.tab));
+async function showTab(t, recDate = null) {
+  TAB = t;
+  document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("on", b.dataset.tab === t));
+  $("tab-bt").hidden = t !== "bt"; $("tab-rec").hidden = t !== "rec";
+  resizeCharts();
+  if (t === "bt") { if (cur.date) history.replaceState(null, "", `#${cur.date}` + (cur.sid ? `/${cur.sid}` : "")); return; }
+  if (!REC.idx) await loadRecIndex();
+  const days = REC.idx ? REC.idx.days : [];
+  if (!days.length) { history.replaceState(null, "", "#rec"); return; }
+  loadRecDay(recDate && REC.by[recDate] ? recDate : REC.date || days[days.length - 1].date);
+}
+const wanStr = (v) => v === null || v === undefined ? "–" : `<span class="${cls(v)}">${v > 0 ? "+" : ""}${(v / 1e4).toFixed(1)} 萬</span>`;
+const yuan = (v) => v === null || v === undefined ? "–" : `<span class="${cls(v)}">${v > 0 ? "+" : ""}${Math.round(v).toLocaleString()}</span>`;
+const rpc = (v) => `<span class="${cls(v)}">${pct(v)}</span>`;
+const tk = (v) => v === null || v === undefined ? "–" : (v > 0 ? "+" : "") + v;
+async function loadRecIndex() {
+  try { REC.idx = await DS.recIndex(); } catch (e) { REC.idx = { stats: {}, days: [] }; }
+  const days = REC.idx.days || []; REC.by = {}; days.forEach((d) => REC.by[d.date] = d);
+  $("recmain").hidden = !days.length; $("recempty").hidden = !!days.length;
+  if (!days.length) {
+    $("recstats").innerHTML = "";
+    $("recempty").innerHTML = "還沒有實盤紀錄。<br>雲端盤中程式 (live.yml) 每個交易日收盤後把當天實盤檔上傳到 HF，晚上 cloud_nightly 與同日回測對齊後就會出現在這裡。" +
+      (LOCAL ? "<br>本機模式讀 signals/ (orb_live.py run 的輸出；webapp.py --live-dir 可指定其他資料夾)。" : "");
+    return;
+  }
+  const s = REC.idx.stats;
+  $("recstats").innerHTML = [["期間", `${s.first} ~ ${s.last}`], ["實盤天數", `${s.n_days} (有交易 ${s.n_live_days})`], ["實盤筆數", s.n_live], ["回測筆數", s.n_bt], ["兩邊都有", s.n_both],
+    ["實盤每筆", rpc(s.live_avg)], ["回測每筆", rpc(s.bt_avg)], ["實盤累計", wanStr(s.live_pnl)],
+    [`同期 (${s.n_ready} 天) 實盤 vs 回測`, `${wanStr(s.live_pnl_ready)} vs ${wanStr(s.bt_pnl)}，差 ${wanStr(s.diff_pnl)}`], ["平均進場差", s.entry_ticks_avg === null ? "–" : tk(s.entry_ticks_avg) + " 檔"]]
+    .map(([k, v]) => `<span class="chip">${k} <b>${v}</b></span>`).join("");
+  recL.setData(days.map((d) => ({ time: d.date, value: d.cum_live / 1e4 })));
+  recB.setData(days.filter((d) => d.cum_bt !== null).map((d) => ({ time: d.date, value: d.cum_bt / 1e4 })));
+  recEq.timeScale().fitContent();
+  $("recdays").innerHTML = `<table class="dl"><thead><tr><th>日期</th><th>實盤 / 回測筆</th><th>實盤每筆</th><th>回測每筆</th><th>實盤損益</th><th>回測損益</th><th>差</th><th>進場差 (檔)</th><th>備註</th></tr></thead><tbody>` +
+    [...days].reverse().map((d) => `<tr data-d="${d.date}"><td>${d.date.slice(5)} (${wd(d.date)})</td><td>${d.n_live} / ${d.bt_ready ? d.n_bt : "–"}</td><td>${rpc(d.live_avg)}</td><td>${rpc(d.bt_avg)}</td>
+      <td>${yuan(d.live_pnl)}</td><td>${yuan(d.bt_pnl)}</td><td>${yuan(d.diff_pnl)}</td><td>${tk(d.entry_ticks_avg)}</td><td>${d.note || ""}</td></tr>`).join("") + `</tbody></table>`;
+  $("recdays").querySelectorAll("tbody tr").forEach((el) => el.onclick = () => loadRecDay(el.dataset.d));
+}
+recEq.subscribeClick((p) => { const t = timeStr(p.time); if (t && REC.by[t]) loadRecDay(t); });
+recEq.subscribeCrosshairMove((p) => { const t = timeStr(p.time); const d = t && REC.by[t];
+  $("receqval").innerHTML = d ? `${t}　實盤 ${wanStr(d.cum_live)}　回測 ${d.cum_bt === null ? "–" : wanStr(d.cum_bt)}` : ""; });
+
+async function loadRecDay(date) {
+  REC.date = date; history.replaceState(null, "", `#rec/${date}`);
+  $("recdays").querySelectorAll("tbody tr").forEach((el) => el.classList.toggle("sel", el.dataset.d === date));
+  $("rectitle").textContent = `${date} (週${wd(date)})`;
+  let j;
+  try { j = await DS.recDay(date); } catch (e) { j = { error: `${date} 沒有逐檔資料` }; }
+  if (j.error) { $("recchips").innerHTML = ""; $("recrows").innerHTML = `<div class="empty">${j.error}</div>`; $("recev").innerHTML = $("recex").innerHTML = ""; return; }
+  const s = j.summary;
+  const ch = [["實盤", `${s.n_live} 筆 ${pct(s.live_avg)} ${wanStr(s.live_pnl)}`], ["回測", s.bt_ready ? `${s.n_bt} 筆 ${pct(s.bt_avg)} ${wanStr(s.bt_pnl)}` : "尚未更新"]];
+  if (s.diff_pnl !== null) ch.push(["差", wanStr(s.diff_pnl)]);
+  if (s.n_both) ch.push(["同股 " + s.n_both + " 筆每筆", `實盤 ${pct(s.both_live_avg)} / 回測 ${pct(s.both_bt_avg)}`], ["平均進場差", tk(s.entry_ticks_avg) + " 檔"]);
+  if (s.note) ch.push(["備註", s.note]);
+  $("recchips").innerHTML = ch.map(([k, v]) => `<span class="chip">${k} <b>${v}</b></span>`).join("");
+  const hasBt = !!BYDATE[date];
+  const ex = (x) => x ? `${x.reason.startsWith("停損") ? '<span class="tag stop">停損</span>' : '<span class="tag">收盤</span>'}${x.locked ? ' <span class="tag stop">鎖漲停</span>' : ""} ${fmt(x.exit_px)} <span class="sub">${x.exit_time || ""}</span>` : "–";
+  const en = (x) => x ? `${fmt(x.entry_px)} <span class="sub">${x.entry_time || ""}</span>` : "–";
+  $("recrows").innerHTML = j.rows.length ? `<table class="cmp"><thead>
+    <tr><th></th><th></th><th class="grp sep" colspan="3">進場</th><th class="grp sep" colspan="3">出場</th><th class="grp sep" colspan="3">報酬 (含成本)</th><th></th></tr>
+    <tr><th>代號</th><th>名稱</th><th class="sep">實盤放空</th><th>回測進場</th><th>差 (檔)</th><th class="sep">實盤</th><th>回測</th><th>差 (檔)</th><th class="sep">實盤</th><th>回測</th><th>差</th><th>說明</th></tr></thead><tbody>` +
+    j.rows.map((r) => `<tr class="${r.side === "both" ? "" : "only-" + r.side}"><td>${hasBt ? `<a class="sid" href="#${date}/${r.stock_id}" title="看回測 K 線">${r.stock_id}</a>` : r.stock_id}</td><td>${r.name}</td>
+      <td class="sep">${en(r.live)}</td><td>${en(r.bt)}</td><td>${tk(r.entry_ticks)}</td>
+      <td class="sep">${ex(r.live)}</td><td>${ex(r.bt)}</td><td>${tk(r.exit_ticks)}</td>
+      <td class="sep">${r.live ? rpc(r.live.r_pct) : "–"}</td><td>${r.bt ? rpc(r.bt.r_pct) : "–"}</td><td>${r.r_diff === null ? "–" : rpc(r.r_diff)}</td><td>${r.note || ""}</td></tr>`).join("") + `</tbody></table>`
+    : `<div class="empty">${s.note || "這天兩邊都沒有交易。"}</div>`;
+  $("recevs").textContent = `實盤事件紀錄 (${j.events.length})`;
+  $("recev").innerHTML = j.events.map((e) => `${e.time} ${e.stock_id} ${e.name} ${e.event} @ ${fmt(e.price)}　${e.note}`).join("<br>") || "無";
+  $("recexs").textContent = `實盤 09:05 剔除 (${j.excluded.length})`;
+  $("recex").innerHTML = j.excluded.map((e) => `${e.stock_id} ${e.name}: ${e.reason}`).join("<br>") || "無";
+}
 init(); loadLive();
 </script>
 </body>
