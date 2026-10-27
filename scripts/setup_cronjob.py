@@ -7,7 +7,8 @@
   GH_DISPATCH_TOKEN   GitHub fine-grained token, Repository access 只選 quant_trading_v2, 權限 Actions: Read and write
 用法:
   CRONJOB_API_KEY=... GH_DISPATCH_TOKEN=... python3 scripts/setup_cronjob.py [--test]
-  python3 scripts/setup_cronjob.py --env-file /path/to/.env [--test]      # .env 內放上面兩個變數
+  python3 scripts/setup_cronjob.py --env-file /path/to/.env [--test]      # .env 內放上面兩個變數 (也認 v1 的 CRONJOB_API_KEY_DAY_TRADE / CORN_JOB_TOKEN_DAY_TRADE / GITHUB_DAY_TRADE)
+  --env-file 可給多次 (例如一個放 cron-job key、一個放 GitHub token)
 --test 會先直接觸發一次 nightly.yml 驗證 GitHub token。
 """
 import os, sys, json, requests
@@ -32,7 +33,8 @@ def main():
     env = dict(os.environ)
     for i, a in enumerate(sys.argv):
         if a == "--env-file": env.update(read_env_file(sys.argv[i + 1]))
-    key = env.get("CRONJOB_API_KEY") or env.get("CRONJOB_API_KEY_DAY_TRADE"); gh = env.get("GH_DISPATCH_TOKEN")
+    key = env.get("CRONJOB_API_KEY") or env.get("CRONJOB_API_KEY_DAY_TRADE") or env.get("CORN_JOB_TOKEN_DAY_TRADE")
+    gh = env.get("GH_DISPATCH_TOKEN") or env.get("GITHUB_DISPATCH_TOKEN_DAY_TRADE") or env.get("GITHUB_DAY_TRADE")
     if not key or not gh: sys.exit("缺 CRONJOB_API_KEY 或 GH_DISPATCH_TOKEN")
     if "--test" in sys.argv:
         r = requests.post(dispatch_url("nightly.yml"), headers={"Authorization": f"Bearer {gh}", "Accept": "application/vnd.github+json"}, json={"ref": "main"}, timeout=20)
