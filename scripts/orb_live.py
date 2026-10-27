@@ -33,7 +33,7 @@ REPO = HF_REPO
 UA = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
 
 P = dict(LIQ_DV20=1e8, POOL_DV20=3e8, ATR_MIN=0.03, PRICE_MIN=10.0, PRICE_MAX=300.0,
-         GAP_MIN=0.02, MKT_GAP_MIN=-0.01, NO_DOW={0}, W=5, DEADLINE=180, MAX_N=10, O5_VR_MIN=0.05,
+         GAP_MIN=0.02, MKT_GAP_MIN=-0.01, NO_DOW={0}, W=5, DEADLINE=180, MAX_N=10, O5_VR_MIN=0.05, DISP_N=3,
          FORCE=0.08, STOP_SLIP=0.001, FORCE_SLIP=0.002, LOCK=0.07)
 
 
@@ -139,8 +139,15 @@ def open_stage(pool, opens, date):
     if not (mkt_gap >= P["MKT_GAP_MIN"]): reasons.append(f"大盤平均跳空 {mkt_gap*100:.2f}% < {P['MKT_GAP_MIN']*100:.0f}%")
     return cand.sort_values("gap", ascending=False).reset_index(drop=True), dict(mkt_gap=mkt_gap, breadth=breadth, n_open=int(x.open.notna().sum()), n_liq=len(x), trade_ok=not reasons, reasons=reasons)
 
+def range_from_bars(bars):
+    """09:00~09:04 的 1 分 K → 區間高 / 低、量 (張)、K 棒數、是否全是一字線 (開=高=低=收).
+    處置股分盤撮合 (每 2 / 5 / 20 分鐘撮合一次) 在這 5 分鐘只有 1~3 根一字線, range_stage 用 o5_n / o5_flat 剔除."""
+    b = bars[bars.t < P["W"]].assign(flat=lambda x: (x.open == x.high) & (x.high == x.low) & (x.low == x.close))
+    return b.groupby("stock_id").agg(rh=("high", "max"), rl=("low", "min"), o5_v=("volume", "sum"), o5_n=("t", "size"), o5_flat=("flat", "all")).reset_index()
+
 def range_stage(cand, rng, lu_mode="tick", eligible=None):
-    """rng: stock_id, rh, rl (+ lu_live). 回傳 (watch, excluded)."""
+    """rng: stock_id, rh, rl (+ lu_live, o5_v, o5_n/o5_flat). 回傳 (watch, excluded).
+    盤中 (MIS 快照) 沒有 o5_n, 處置股靠現沖名單排除 (處置期間不在證交所 / 櫃買現沖名單)。"""
     c = cand.merge(rng, on="stock_id", how="left")
     if lu_mode == "pc":                       # 回放對帳: 與回測一致用 昨收×1.1
         c["lu"] = c.pc * 1.10
@@ -148,6 +155,8 @@ def range_stage(cand, rng, lu_mode="tick", eligible=None):
         c["lu"] = c["lu_live"].fillna(c.limit_up) if "lu_live" in c.columns else c.limit_up
     why = pd.Series("", index=c.index)
     why[c.rh.isna() | c.rl.isna()] = "開盤 5 分無成交"
+    if "o5_n" in c.columns:
+        why[(why == "") & (c.o5_n <= P["DISP_N"]) & (c.o5_flat == True)] = "處置股分盤撮合"
     why[(why == "") & (c.rh >= c.lu * 0.999)] = "開盤 5 分內摸漲停"
     why[(why == "") & (c.rh >= c.force_px)] = "開盤 5 分內已到昨收 +8%"
     if "o5_v" in c.columns:                                                   # 張 → 股, 對前 20 日均量 (股)
@@ -383,8 +392,7 @@ def replay_day(date, d1, m1, eligible=None, verbose=False):
     if not info["trade_ok"]:
         return pd.DataFrame(), info, pd.DataFrame(), pd.DataFrame()
     bars = m1[(m1.date == date) & m1.stock_id.isin(cand.stock_id)].sort_values(["t", "stock_id"])
-    rng = bars[bars.t < P["W"]].groupby("stock_id").agg(rh=("high", "max"), rl=("low", "min"), o5_v=("volume", "sum")).reset_index()
-    watch, excl = range_stage(cand, rng, lu_mode="pc", eligible=eligible)
+    watch, excl = range_stage(cand, range_from_bars(bars), lu_mode="pc", eligible=eligible)
     info["n_watch"] = len(watch)
     book = Book(watch, "bar", log=(lambda e: print(f"  {e['time']} {e['stock_id']} {e['name']} {e['event']} {e['price']:.2f}  {e['note']}")) if verbose else None)
     b = bars[(bars.t >= P["W"]) & bars.stock_id.isin(watch.stock_id)]
@@ -397,7 +405,7 @@ def replay_day(date, d1, m1, eligible=None, verbose=False):
 
 
 def expected_trades(start, end):
-    """回測 (14_orb_dn_deepdive: W=5, 跳空≥2% ∩ ATR≥3%, 停損區間高, 可執行濾網, 開盤 5 分量 ≥ 日均量 5%, 每日前 10 檔) 的逐筆結果, 供對帳."""
+    """回測 (14_orb_dn_deepdive: W=5, 跳空≥2% ∩ ATR≥3%, 停損區間高, 可執行濾網, 開盤 5 分量 ≥ 日均量 5%, 排除處置股, 每日前 10 檔) 的逐筆結果, 供對帳."""
     f = pd.read_parquet(PROC / "d1_feat.parquet", columns=["stock_id", "date", "univ", "pc", "gap", "atr20", "dv20", "vol20", "mkt_gap", "dow"])
     f = f[f.univ & (f.date >= start) & (f.date <= end)]
     yms = sorted({d.strftime("%Y_%m") for d in pd.to_datetime(f.date.unique())})
@@ -407,6 +415,15 @@ def expected_trades(start, end):
     lu = s.pc * 1.1; fpx = s.pc * 1.08
     s = s[(s.gap >= 0.02) & (s.atr20 >= 0.03) & (s.dow != 0) & (s.mkt_gap >= -0.01) & (s.dv20 >= 3e8) & (s.pc <= 300) & s.dn5_t.notna() & (s.dn5_t <= 180)
           & (s.o5_h < lu * 0.999) & (s.o5_h < fpx) & (s.dn5_px < fpx) & (s.o5_v * 1000 / s.vol20 >= P["O5_VR_MIN"])].copy()
+    # 處置股 (分盤撮合): 開盤 5 分只有 ≤3 根一字線 → 剔除 (orb_dn 特徵檔沒有, 從 1 分 K 算)
+    disp = []
+    for ym, g in s.groupby(s.date.dt.strftime("%Y_%m")):
+        m = pd.read_parquet(m1_path(ym), filters=[("stock_id", "in", sorted(g.stock_id.unique()))], columns=["stock_id", "date", "open", "high", "low", "close", "volume"])
+        m["ts"] = pd.to_datetime(m.date); m["date"] = m.ts.dt.normalize(); m["t"] = m.ts.dt.hour * 60 + m.ts.dt.minute - 540
+        m = m[(m.t >= 0) & (m.t < P["W"])].assign(flat=lambda x: (x.open == x.high) & (x.high == x.low) & (x.low == x.close))
+        disp.append(m.groupby(["stock_id", "date"]).agg(o5_n=("t", "size"), o5_flat=("flat", "all")).reset_index())
+    s = s.merge(pd.concat(disp, ignore_index=True), on=["stock_id", "date"], how="left")
+    s = s[~((s.o5_n <= P["DISP_N"]) & (s.o5_flat == True))].copy()
     lu = s.pc * 1.1; fpx = s.pc * 1.08
     st = np.maximum(s.dn5_stop_hi_px, s.dn5_stop_hi_open) * (1 + P["STOP_SLIP"])
     ex = st.where(st.notna(), s.auc_c)

@@ -609,8 +609,7 @@ def cmd_replay(a):
         summ = summarize(ds, info, pd.DataFrame(), pd.DataFrame(), 0, "replay · 不交易"); write_day(ds, pd.DataFrame(), pd.DataFrame(), [], summ, out); log("今日不交易"); return
     bars = m1[(m1.date == date) & m1.stock_id.isin(cand.stock_id)].sort_values(["t", "stock_id"]).copy()
     bars[["open", "high", "low", "close"]] = bars[["open", "high", "low", "close"]].astype(float).round(2)    # 分 K 是 float32
-    rng = bars[bars.t < OL.P["W"]].groupby("stock_id").agg(rh=("high", "max"), rl=("low", "min"), o5_v=("volume", "sum")).reset_index()
-    watch, excl = OL.range_stage(cand, rng, lu_mode="pc"); info["n_watch"] = len(watch)
+    watch, excl = OL.range_stage(cand, OL.range_from_bars(bars), lu_mode="pc"); info["n_watch"] = len(watch)
     book = OL.Book(watch, "live", capital=a.capital)
     watch["lots"] = watch.stock_id.map(lambda s: book.s[s]["lots"])
     log(f"監看 {len(watch)} 檔:\n" + (OL.fmt_watch(watch) if len(watch) else "(無)"))
