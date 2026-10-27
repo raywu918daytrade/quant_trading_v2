@@ -276,3 +276,32 @@ cron-job.org (平日, 台灣時間)
 - 手動補跑: GitHub → Actions → Live signals / Nightly history update → Run workflow。
 - 盤中只產生訊號、不下單。live.yml 跑約 4.7 小時 (public repo 免費)。MIS 回傳日期不是今天 (假日) 會寫「非交易日」後正常結束。
 - 部署完成 (2026-10-27): Secrets `HF_TOKEN` = HF.env 的 `HF_TOKEN_1` (raywu918daytrade, fine-grained 有 daytrade dataset 寫入權；daytrade.env 的 HF_TOKEN 屬 raywu918python, 沒有寫入權)。cron-job.org job 8734280 (live 08:50)、8734281 (nightly 21:00)、8734282 (nightly 08:10), 由 ray.env 的 `CORN_JOB_TOKEN_DAY_TRADE` 與 `GITHUB_DAY_TRADE` 建立。`scripts/hf_check.py <env 檔>` 可檢查 HF token 的帳號與寫入權 (不印值)。
+
+## 永豐模擬環境自動執行 + 滑價紀錄 (2026-10-27) — `scripts/paper_orb.py` + `.github/workflows/paper.yml`
+目的: 量測實際滑價。回測假設在區間低成交, 滑 1 檔年均從 109 萬掉到 43 萬 (`stats/delay_drawdown.md`), 是否加「一檔 ≤0.15%」與部位配置都等這個數字。
+選股與進出場規則完全沿用 `orb_live.py` (`build_pool` / `open_stage` / `range_stage` / `Book`: 每日最多 10 檔、每檔 30 萬整數張、先跌破先做、12:00 後失效), 只把訊號換成永豐**模擬環境**委託。
+```
+cron-job.org 08:50 → paper.yml: orb_live.py refresh (D1) → paper_orb.py run --publish
+  09:02  MIS 開盤 → 候選; 登入 Shioaji(simulation=True), 訂閱候選逐筆 tick
+  09:05  MIS 區間 → 監看名單 (同 live.yml); 每筆 tick 餵 orb_live.Book
+         tick < 區間低 → 立即市價「現股當沖先賣」(daytrade_short); tick > 區間高 → 立即市價買回 (只買回券賣實際成交的張數)
+  13:25  其餘部位以漲停價限價 ROD 買回 (13:25 起收盤集合競價不收市價單, v1 2026-10-27 實測 op_code 88) → 以收盤價成交
+  13:35  結算 → HF db/orb/paper/
+```
+- **為什麼不是觸價單**: Shioaji (1.7.x) 沒有股票觸價 / 條件單 API, 所以是「tick 偵測 → 市價單」, 並記錄每一段延遲。
+- 每一腳 (進場 / 停損 / 收盤) 記: 訊號價 (區間低 / 區間高 / 收盤價)、觸發 tick 價、tick 交易所時間、本機收到時間、委託時間、成交時間、成交價、滑價 (元 / 檔 / %)。**滑價正 = 對我們不利** (券賣: 訊號價 − 成交價；買回: 成交價 − 訊號價)；檔數用升降單位逐檔數 (跨 50 / 100 元級距也對)。拆成 **觸發滑價** (訊號價 → 第一筆跌破的 tick, 定義上至少 1 檔) + **執行滑價** (觸發 tick → 模擬成交價)。延遲: `detect_ms` (收到 − tick 時間)、`order_ms` (送單 − 收到)、`fill_ms`、`tick_to_fill_ms`。
+- 輸出 `paper/<date>_trades.csv` (每檔: 狀態、券賣 / 買回價與時間、進出場滑價檔數、模擬報酬 `sim_net_pct`、回測口徑報酬 `ideal_net_pct` = 區間低進場 / 區間高×1.001 停損 / 收盤回補, 皆含成本 0.23%)、`_slippage.csv` (每一腳)、`_events.csv`、`_watch.csv`、`_summary.json`；`--publish` 上傳 HF `db/orb/paper/`, 並更新 `latest.json`、`live.json` (盤中每 3 分鐘 / 有事件即時) 與累計 `summary.csv` (每日一列)、`slippage.csv` (每一腳一列; 讀不到舊檔時不覆蓋)。
+- 安全: `Shioaji(simulation=True)` 寫死、常數 `SIMULATION=True`、從不 `activate_ca()`、登入後 `account_balance` 必須是模擬預設值 (同 v1 的三道查核), 任一不過就停止。委託帶 `custom_field="orbv2"`, 和 v1 `paper_trade.py` 共用同一個模擬帳戶也不會讀錯回報。workflow 濾掉 Shioaji 登入時印的 `Session Property` 行 (含身分證字號)。
+- 防裸空: 停損 / 收盤時先取消未成交的券賣單；若取消與成交賽跑、券賣之後才回報成交, `reconcile()` 會補買回差額。永豐合約顯示不可現沖券賣的股票照樣佔 Book 名額 (與訊號一致) 但不下單, 標「略過」。
+- 限制: 模擬環境的成交價是永豐依行情撮合的模擬值, 沒有真實委託簿衝擊；主要量到的是 偵測延遲 + 觸發後的價格移動。v1 2026-10-27 的模擬券賣成交時間是 09:03:17~19 (表定 09:01 送單, 原因未確認), 所以同時看 `trigger_slip_ticks` (只靠行情, 跟券商無關) 與 `slip_ticks`。
+```bash
+python3 scripts/paper_orb.py run --dry --now                 # 不等時間、不下單: 算名單; 有 SINOPAC_* 時也登入模擬環境查合約 / 快照
+python3 scripts/paper_orb.py run --env-file <.env> --publish # 盤中正式跑 (08:50 後啟動, 跑到 13:35)
+python3 scripts/paper_orb.py replay --date 2026-10-22        # 離線: 歷史分 K 合成 tick + 假券商, 走完整個 下單 / 停損 / 收盤 / 結算; 輸出 paper/replay/
+```
+- 驗證 (2026-10-27, 本機): `replay` 2026-09-01 ~ 10-23 共 38 個交易日, 每天進場股票與 `orb_live.py replay` 完全相同；`run --dry --now` (無憑證) 走完 MIS 開盤 / 區間 / 監看名單；用 Shioaji 1.7.9 確認委託欄位 (`daytrade_short`、`custom_field`、MKT / LMT ROD) 可建立；用假 api 測過 tick / 成交回報 callback、取消券賣與補買回。**尚未在真實盤中登入永豐跑過** (本機沒有讀 .env 憑證)。
+- **需要使用者設定 (一次)**:
+  1. GitHub repo Secrets (raywu918daytrade/quant_trading_v2 → Settings → Secrets and variables → Actions): `SINOPAC_API_KEY`、`SINOPAC_SECRET_KEY` (與 v1 相同的永豐 API key; 模擬環境不需要憑證 CA)。`HF_TOKEN` 已設定 (live.yml 用的同一把)。用 gh 時會提示輸入, 值不會出現在指令列: `gh secret set SINOPAC_API_KEY -R raywu918daytrade/quant_trading_v2`、`gh secret set SINOPAC_SECRET_KEY -R raywu918daytrade/quant_trading_v2`。
+  2. 合併到 main 並推送後 (推 `.github/workflows/` 需要有 workflow scope 的帳號), 重跑 `python3 scripts/setup_cronjob.py --env-file <.env>` 新增 cron-job.org 「fade v2 paper 08:50」(其餘三個 job 只會被更新, 不重複建立)。
+  3. 第一次建議手動: GitHub → Actions → Paper trade → Run workflow, 看 log 有「✓ 模擬環境確認」。
+- 同一組 API key 平日會同時有 v1 paper_trade (sr、base 兩台) 與 v2 paper 三個登入；永豐對同時連線數有上限, 若 log 出現登入被拒再調整。

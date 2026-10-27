@@ -1,0 +1,50 @@
+name: Paper trade (Sinopac simulation, 08:50 ~ 13:35)
+on:
+  # 同 live.yml: 不用 GitHub 自己的 schedule, 由 cron-job.org 平日台灣 08:50 打 workflow_dispatch (scripts/setup_cronjob.py)。
+  # paper_orb.py 自己等 09:02 開盤 / 09:05 區間, 用永豐「模擬環境」逐筆 tick 偵測跌破 → 模擬委託, 13:25 收盤競價回補, 13:35 結算;
+  # 每筆成交與滑價寫到 HF db/orb/paper/。程式寫死 simulation=True、不啟用 CA, 不可能真下單。
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "週一 / 大盤弱也照跑 (觀察用): 填 1"
+        default: ""
+concurrency:
+  group: orb-paper
+  cancel-in-progress: false
+jobs:
+  paper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      TZ: Asia/Taipei
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: pip install -q -r requirements.txt shioaji
+      - name: Refresh D1 (last 3 months) from HF
+        run: python3 -W ignore scripts/orb_live.py refresh --months 3 --m1-months 0
+      - name: Run paper trading in Sinopac simulation (publish to HF)
+        env:
+          SINOPAC_API_KEY: ${{ secrets.SINOPAC_API_KEY }}
+          SINOPAC_SECRET_KEY: ${{ secrets.SINOPAC_SECRET_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -o pipefail   # Shioaji 登入時會印含身分證字號的 Session Property 行, 濾掉 (同 v1)
+          F=""; [ -n "${{ github.event.inputs.force }}" ] && F="--force"
+          python3 -W ignore scripts/paper_orb.py run --publish $F 2>&1 | grep --line-buffered -v "Session Property"
+      - name: Upload paper results as run artifact (backup)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paper
+          path: |
+            paper/
+            signals/
+          if-no-files-found: ignore
+          retention-days: 90
