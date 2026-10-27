@@ -1,0 +1,27 @@
+name: Nightly history update
+on:
+  # cron-job.org 平日台灣 21:00 與隔天 08:10 各打一次 (HF 分 K 更新時間不固定; 增量更新, 重複跑沒關係)。
+  workflow_dispatch:
+concurrency:
+  group: orb-nightly
+  cancel-in-progress: false
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TZ: Asia/Taipei
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: pip install -q -r requirements.txt
+      - name: Replay new days, export web JSON, upload to HF
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python3 -W ignore scripts/cloud_nightly.py

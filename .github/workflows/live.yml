@@ -1,0 +1,44 @@
+name: Live signals (08:50 ~ 13:35)
+on:
+  # 不用 GitHub 自己的 schedule (會延遲且 60 天沒 commit 會停用); 由 cron-job.org 平日台灣 08:50 打 workflow_dispatch (scripts/setup_cronjob.py)。
+  # 腳本自己等到 09:02 抓開盤、09:05 定區間, 盤中每 10 秒輪詢到 13:31 結算; 狀態寫到 HF db/orb/live.json 給網頁讀。
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "週一 / 大盤弱也照跑 (觀察用): 填 1"
+        default: ""
+concurrency:
+  group: orb-live
+  cancel-in-progress: false
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      TZ: Asia/Taipei
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: pip install -q -r requirements.txt
+      - name: Refresh D1 (last 3 months) from HF
+        run: python3 -W ignore scripts/orb_live.py refresh --months 3 --m1-months 0
+      - name: Run live (publish to HF)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          F=""; [ -n "${{ github.event.inputs.force }}" ] && F="--force"
+          python3 -W ignore scripts/orb_live.py run --publish $F
+      - name: Upload signals as run artifact (backup)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: signals
+          path: signals/
+          if-no-files-found: ignore
+          retention-days: 60
