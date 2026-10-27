@@ -1,0 +1,10 @@
+data/
+signals/
+logs/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+*.token
+.venv/
+.claude/

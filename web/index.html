@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>歷史交易瀏覽</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  :root {
+    --surface: #fcfcfb; --panel: #ffffff; --line: #e6e5e0; --line2: #d6d5cf;
+    --ink: #121212; --ink2: #55544f; --ink3: #8a8984;
+    --up: #d33a33; --dn: #1a9e6a; --blue: #1f6fd1; --orange: #e07a00; --violet: #8e44ad;
+    --hl: #eef4fd; --hl2: #fff6e6;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--surface); color: var(--ink); font: 14px/1.45 -apple-system, "PingFang TC", "Heiti TC", "Noto Sans TC", sans-serif; }
+  header { padding: 14px 20px 8px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 18px; }
+  header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  .sub { color: var(--ink2); font-size: 12.5px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; font-size: 12.5px; color: var(--ink2); white-space: nowrap; }
+  .chip b { color: var(--ink); font-weight: 600; }
+  .livewrap { margin: 0 20px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .livehead { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; margin-bottom: 6px; }
+  .livehead h2 { font-size: 15px; margin: 0; font-weight: 600; }
+  .phase { font-size: 12.5px; padding: 1px 8px; border-radius: 10px; background: #eef4fd; color: #1f4f9a; }
+  .phase.off { background: #f1f0ec; color: var(--ink2); } .phase.done { background: #eaf6ef; color: #1b6e46; }
+  #livebody table td:last-child, #livebody table th:last-child { text-align: left; white-space: normal; }
+  .st-SHORT { color: var(--blue); font-weight: 600; } .st-STOPPED { color: var(--orange); } .st-CLOSED { color: var(--ink); } .st-WAIT, .st-EXPIRED, .st-FULL { color: var(--ink3); }
+  .eqwrap { margin: 0 20px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px 4px; }
+  .eqhead { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--ink2); padding: 0 2px 4px; }
+  #eq { height: 160px; } #ddc { height: 64px; }
+  .layout { display: grid; grid-template-columns: 250px 1fr; gap: 14px; padding: 14px 20px 30px; }
+  aside { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; align-self: start; position: sticky; top: 10px; max-height: calc(100vh - 20px); display: flex; flex-direction: column; }
+  aside .ctl { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
+  select, button, input[type=date] { font: inherit; font-size: 13px; padding: 4px 6px; border: 1px solid var(--line2); border-radius: 6px; background: #fff; color: var(--ink); }
+  button { cursor: pointer; } button:hover { background: #f3f2ee; }
+  label.cb { font-size: 12.5px; color: var(--ink2); display: flex; gap: 4px; align-items: center; margin-bottom: 6px; }
+  #daylist { overflow-y: auto; flex: 1; border-top: 1px solid var(--line); }
+  .day { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; padding: 5px 6px; border-bottom: 1px solid #f0efea; cursor: pointer; font-size: 13px; }
+  .day:hover { background: #f6f5f1; } .day.sel { background: var(--hl); }
+  .day .n { color: var(--ink2); font-size: 12px; } .day.off { color: var(--ink3); }
+  .pos { color: var(--up); } .neg { color: var(--dn); }
+  main { min-width: 0; }
+  .dayhead { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-bottom: 10px; }
+  .dayhead h2 { margin: 0; font-size: 17px; font-weight: 600; }
+  .grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
+  #trades, #others { overflow-x: auto; }
+  td, th { padding-left: 4px; padding-right: 4px; } #trades table { font-size: 12.5px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; min-width: 0; }
+  .card h3 { margin: 0 0 6px; font-size: 13.5px; font-weight: 600; color: var(--ink2); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+  th { text-align: right; font-weight: 500; color: var(--ink3); font-size: 12px; padding: 4px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  td { text-align: right; padding: 5px 6px; border-bottom: 1px solid #f0efea; white-space: nowrap; }
+  th:nth-child(-n+2), td:nth-child(-n+2) { text-align: left; }
+  tbody tr { cursor: pointer; } tbody tr:hover { background: #f6f5f1; } tbody tr.sel { background: var(--hl); }
+  .tag { display: inline-block; font-size: 11.5px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--line2); color: var(--ink2); }
+  .tag.stop { border-color: #f1c58f; color: #a35a00; background: var(--hl2); }
+  details { margin-top: 10px; } summary { cursor: pointer; color: var(--ink2); font-size: 13px; }
+  .chartbox { position: relative; }
+  .legend { font-size: 12px; color: var(--ink2); min-height: 18px; margin-bottom: 4px; font-variant-numeric: tabular-nums; }
+  #intra { height: 420px; } #daily { height: 230px; margin-top: 6px; }
+  .key { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--ink2); margin: 6px 0 2px; }
+  .key i { display: inline-block; width: 16px; height: 0; border-top: 2px dashed; vertical-align: middle; margin-right: 4px; }
+  .empty { color: var(--ink3); padding: 16px 4px; }
+  .hint { color: var(--ink3); font-size: 12px; margin-top: 8px; }
+  @media (max-width: 1150px) { .grid2 { grid-template-columns: 1fr; } }
+  @media (max-width: 760px) {
+    .layout { grid-template-columns: 1fr; padding: 12px; } aside { position: static; max-height: 300px; }
+    .eqwrap { margin: 0 12px; } header { padding: 12px; } #intra { height: 340px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>跌破開盤區間做空 · 歷史交易</h1>
+  <span class="sub">跳空 ≥2% ∩ ATR20 ≥3% ∩ 開盤 5 分量 ≥ 日均量 5%，跌破開盤 5 分區間低放空，突破區間高停損，否則收盤回補 (回放回測)</span>
+  <div class="chips" id="stats"></div>
+</header>
+<section class="livewrap" id="livewrap">
+  <div class="livehead"><h2>今日即時</h2><span id="livephase" class="phase"></span><span id="liveinfo" class="sub"></span><span id="liveupd" class="sub" style="margin-left:auto"></span></div>
+  <div id="livebody" class="sub">載入中…</div>
+</section>
+<div class="eqwrap">
+  <div class="eqhead"><span>資金曲線 (固定 300 萬、每檔額度 30 萬、整數張、不複利)　點曲線跳到該日</span><span id="eqval"></span></div>
+  <div id="eq"></div><div id="ddc"></div>
+</div>
+<div class="layout">
+  <aside>
+    <div class="ctl"><button id="prev" title="上一個交易日 (←)">◀</button><select id="month"></select><button id="next" title="下一個交易日 (→)">▶</button></div>
+    <div class="ctl"><input type="date" id="pick"></div>
+    <label class="cb"><input type="checkbox" id="onlytr" checked>只顯示有交易的日子</label>
+    <div id="daylist"></div>
+  </aside>
+  <main>
+    <div class="dayhead"><h2 id="dtitle">載入中…</h2><div class="chips" id="dchips"></div></div>
+    <div class="grid2">
+      <div class="card">
+        <h3>進場的股票</h3>
+        <div id="trades"></div>
+        <details id="othwrap"><summary id="othsum">其他監看 / 剔除</summary><div id="others"></div></details>
+        <div class="hint">↑ ↓ 切換股票，← → 切換交易日</div>
+      </div>
+      <div class="card">
+        <h3 id="ctitle">K 線</h3>
+        <div class="legend" id="lg1"></div>
+        <div class="chartbox"><div id="intra"></div></div>
+        <div class="key">
+          <span><i style="border-color:var(--blue)"></i>區間低 (進場)</span><span><i style="border-color:var(--orange)"></i>區間高 (停損)</span>
+          <span><i style="border-color:var(--ink3);border-top-style:dotted"></i>昨收</span><span><i style="border-color:var(--violet);border-top-style:dotted"></i>+8%</span>
+          <span><i style="border-color:var(--up);border-top-style:dotted"></i>漲停</span>
+        </div>
+        <div class="legend" id="lg2" style="margin-top:8px"></div>
+        <div class="chartbox"><div id="daily"></div></div>
+      </div>
+    </div>
+  </main>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+const C = { up: "#d33a33", dn: "#1a9e6a", blue: "#1f6fd1", orange: "#e07a00", violet: "#8e44ad", gray: "#8a8984", grid: "#efeee9", ink2: "#55544f" };
+const WD = "日一二三四五六";
+let DAYS = [], BYDATE = {}, cur = { date: null, sid: null, rows: [] };
+const fmt = (v, d = 2) => (v === null || v === undefined || Number.isNaN(v)) ? "–" : Number(v).toFixed(d);
+const pct = (v, d = 2) => (v === null || v === undefined) ? "–" : (v > 0 ? "+" : "") + Number(v).toFixed(d) + "%";
+const cls = (v) => v > 0 ? "pos" : v < 0 ? "neg" : "";
+const hhmm = (t) => { t = Math.round(t); return String(9 + Math.floor(t / 60)).padStart(2, "0") + ":" + String(t % 60).padStart(2, "0"); };
+const wd = (s) => WD[new Date(s + "T00:00:00Z").getUTCDay()];
+const timeStr = (t) => typeof t === "string" ? t : (t && t.year) ? `${t.year}-${String(t.month).padStart(2, "0")}-${String(t.day).padStart(2, "0")}` : null;
+
+// ---------- charts ----------
+const base = { layout: { background: { color: "#ffffff" }, textColor: C.ink2, fontSize: 11 }, grid: { vertLines: { color: C.grid }, horzLines: { color: C.grid } },
+  rightPriceScale: { borderColor: "#e6e5e0" }, timeScale: { borderColor: "#e6e5e0" }, crosshair: { mode: 0 } };
+const eq = LightweightCharts.createChart($("eq"), { ...base, timeScale: { ...base.timeScale, visible: false }, handleScroll: false, handleScale: false });
+const eqS = eq.addLineSeries({ color: C.blue, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, priceFormat: { type: "custom", formatter: (v) => Math.round(v).toLocaleString() + " 萬" } });
+const eqM = eq.addLineSeries({ color: "rgba(0,0,0,0)", lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+const dd = LightweightCharts.createChart($("ddc"), { ...base, handleScroll: false, handleScale: false });
+const ddS = dd.addAreaSeries({ lineColor: C.up, topColor: "rgba(211,58,51,0.08)", bottomColor: "rgba(211,58,51,0.35)", lineWidth: 1, invertFilledArea: false, priceLineVisible: false, lastValueVisible: false, priceFormat: { type: "custom", formatter: (v) => v.toFixed(0) + " 萬" } });
+eq.timeScale().subscribeVisibleLogicalRangeChange((r) => r && dd.timeScale().setVisibleLogicalRange(r));
+const jump = (p) => { const t = timeStr(p.time); if (t) loadDay(t, null, true); };
+eq.subscribeClick(jump); dd.subscribeClick(jump);
+eq.subscribeCrosshairMove((p) => { const t = timeStr(p.time); const d = t && BYDATE[t]; $("eqval").textContent = d ? `${t}  ${Math.round(d.equity).toLocaleString()} 萬　當日 ${d.pnl_w >= 0 ? "+" : ""}${d.pnl_w.toFixed(1)} 萬　回撤 ${d.dd_w.toFixed(1)} 萬` : ""; });
+
+const noWheel = { handleScroll: { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false }, handleScale: { mouseWheel: false, pinch: true, axisPressedMouseMove: true } };
+const intraday = LightweightCharts.createChart($("intra"), { ...base, ...noWheel, timeScale: { ...base.timeScale, timeVisible: true, secondsVisible: false, rightOffset: 14 },
+  localization: { timeFormatter: (ts) => new Date(ts * 1000).toISOString().slice(11, 16) } });
+const iC = intraday.addCandlestickSeries({ upColor: C.up, downColor: C.dn, wickUpColor: C.up, wickDownColor: C.dn, borderVisible: false, priceLineVisible: false });
+const iV = intraday.addHistogramSeries({ priceFormat: { type: "volume" }, priceScaleId: "", lastValueVisible: false, priceLineVisible: false });
+iV.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+let LV = null;   // 讓縱軸一定包含 區間低 / 區間高
+iC.applyOptions({ autoscaleInfoProvider: (orig) => { const r = orig(); if (r && LV) { r.priceRange.minValue = Math.min(r.priceRange.minValue, LV[0]); r.priceRange.maxValue = Math.max(r.priceRange.maxValue, LV[1]); } return r; } });
+const daily = LightweightCharts.createChart($("daily"), { ...base, ...noWheel, timeScale: { ...base.timeScale, rightOffset: 3 } });
+const dC = daily.addCandlestickSeries({ upColor: C.up, downColor: C.dn, wickUpColor: C.up, wickDownColor: C.dn, borderVisible: false, priceLineVisible: false });
+const dV = daily.addHistogramSeries({ priceFormat: { type: "volume" }, priceScaleId: "", lastValueVisible: false, priceLineVisible: false });
+dV.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+let plines = [];
+new ResizeObserver(() => {
+  for (const [c, el] of [[eq, "eq"], [dd, "ddc"], [intraday, "intra"], [daily, "daily"]]) c.applyOptions({ width: $(el).clientWidth, height: $(el).clientHeight });
+  eq.timeScale().fitContent(); dd.timeScale().fitContent(); fitIntra(); daily.timeScale().fitContent();
+}).observe(document.body);
+
+let IBARS = {}, DBARS = {}, NIB = 0;
+const fitIntra = () => { if (NIB) intraday.timeScale().setVisibleLogicalRange({ from: -10, to: NIB + 14 }); };
+intraday.subscribeCrosshairMove((p) => { const b = p.time && IBARS[p.time]; $("lg1").innerHTML = b ? legend(new Date(p.time * 1000).toISOString().slice(11, 16), b) : cur.legend1 || ""; });
+daily.subscribeCrosshairMove((p) => { const t = timeStr(p.time); const b = t && DBARS[t]; $("lg2").innerHTML = b ? legend(t, b) : cur.legend2 || ""; });
+function legend(t, b) { const c = b.c >= b.o ? "pos" : "neg"; return `${t}　開 ${fmt(b.o)}　高 ${fmt(b.h)}　低 ${fmt(b.l)}　收 <span class="${c}">${fmt(b.c)}</span>　量 ${b.v.toLocaleString()} 張`; }
+
+// ---------- data ----------
+async function getJSON(u) { const r = await fetch(u); if (!r.ok) throw new Error(r.status + " " + u); return r.json(); }
+// 資料來源: 本機 (webapp.py 的 /api) 或 靜態 (HF 上 export_web.py 產生的 JSON)。?data=<網址> 可指定靜態資料位置 (測試用)。
+const HF_ORB = "https://huggingface.co/datasets/raywu918daytrade/daytrade/resolve/main/db/orb/";
+const QS = new URLSearchParams(location.search);
+const LOCAL = ["localhost", "127.0.0.1"].includes(location.hostname) && !QS.get("data");
+const DATA = QS.get("data") || (HF_ORB + "web/");
+const LIVE_URL = QS.get("live") || (LOCAL ? "/api/live" : HF_ORB + "live.json");
+const DAYCACHE = {};
+const DS = {
+  days: () => LOCAL ? getJSON("/api/days") : getJSON(DATA + "index.json?t=" + Date.now()),
+  day: async (d) => {
+    if (LOCAL) return getJSON(`/api/day?date=${d}`);
+    if (!DAYCACHE[d]) DAYCACHE[d] = await getJSON(DATA + `days/${d}.json`).catch(() => ({ error: `${d} 沒有資料` }));
+    return DAYCACHE[d];
+  },
+  bars: async (d, sid) => {
+    if (LOCAL) return getJSON(`/api/bars?date=${d}&sid=${sid}`);
+    const j = await DS.day(d); const b = (j.bars || {})[sid] || {};
+    return { intraday: b.i || [], daily: b.d || [], info: b.info || {} };
+  },
+  live: () => getJSON(LIVE_URL + (LIVE_URL.includes("?") ? "&" : "?") + "t=" + Date.now()),
+};
+async function init() {
+  const j = await DS.days();
+  DAYS = j.days; DAYS.forEach((d, i) => { d.i = i; BYDATE[d.date] = d; });
+  const s = j.stats;
+  $("stats").innerHTML = [["期間", `${s.first} ~ ${s.last}`], ["筆數", s.n_trades.toLocaleString()], ["每筆", pct(s.per_trade)], ["勝率", s.win.toFixed(1) + "%"],
+    ["Sharpe", s.sharpe.toFixed(2)], ["最大回撤", `${Math.round(s.mdd_w)} 萬 (${s.mdd.toFixed(1)}%)`], ["累計損益", "+" + Math.round(s.total).toLocaleString() + " 萬"]]
+    .map(([k, v]) => `<span class="chip">${k} <b>${v}</b></span>`).join("");
+  eqS.setData(DAYS.map((d) => ({ time: d.date, value: d.equity })));
+  ddS.setData(DAYS.map((d) => ({ time: d.date, value: d.dd_w })));
+  eq.timeScale().fitContent(); dd.timeScale().fitContent();
+  const months = [...new Set(DAYS.map((d) => d.date.slice(0, 7)))].reverse();
+  $("month").innerHTML = months.map((m) => `<option value="${m}">${m}</option>`).join("");
+  $("pick").min = DAYS[0].date; $("pick").max = DAYS[DAYS.length - 1].date;
+  const [hd, hs] = decodeURIComponent(location.hash.slice(1)).split("/");
+  const last = [...DAYS].reverse().find((d) => d.n_trades > 0);
+  loadDay(BYDATE[hd] ? hd : last.date, hs || null);
+}
+
+function renderDayList(month) {
+  const only = $("onlytr").checked;
+  const rows = DAYS.filter((d) => d.date.startsWith(month) && (!only || d.n_trades > 0));
+  $("daylist").innerHTML = rows.length ? rows.map((d) => {
+    const off = !d.trade_ok ? "off" : "";
+    const right = !d.trade_ok ? `<span class="n">${d.reasons.includes("週一") ? "週一" : "大盤弱"}</span><span></span>` :
+      `<span class="n">${d.n_trades} 筆</span><span class="${cls(d.pnl_w)}">${d.pnl_w > 0 ? "+" : ""}${d.pnl_w.toFixed(1)} 萬</span>`;
+    return `<div class="day ${off} ${d.date === cur.date ? "sel" : ""}" data-d="${d.date}"><span>${d.date.slice(5)} (${wd(d.date)})</span>${right}</div>`;
+  }).join("") : `<div class="empty">這個月沒有交易</div>`;
+  $("daylist").querySelectorAll(".day").forEach((el) => el.onclick = () => loadDay(el.dataset.d));
+  const sel = $("daylist").querySelector(".sel"); if (sel) sel.scrollIntoView({ block: "nearest" });
+}
+
+async function loadDay(date, sid = null, fromChart = false) {
+  cur.date = date; $("month").value = date.slice(0, 7); $("pick").value = date;
+  renderDayList(date.slice(0, 7));
+  const j = await DS.day(date);
+  if (j.error) { $("dtitle").textContent = j.error; return; }
+  const s = j.summary;
+  $("dtitle").textContent = `${date} (週${wd(date)})`;
+  const ch = [["大盤跳空", pct(s.mkt_gap * 100)], ["候選", s.n_cand], ["監看", s.n_watch], ["進場", s.n_trades]];
+  if (s.n_trades) { const dw = BYDATE[date]; ch.push(["當日損益", `<span class="${cls(dw.pnl_w)}">${dw.pnl_w > 0 ? "+" : ""}${dw.pnl_w.toFixed(1)} 萬 (${pct(dw.ret_int)})</span>`], ["平均每筆", `<span class="${cls(s.ret_avg)}">${pct(s.ret_avg)}</span>`], ["停損", s.n_stop]); }
+  if (!s.trade_ok) ch.push(["不交易", s.reasons]);
+  $("dchips").innerHTML = ch.map(([k, v]) => `<span class="chip">${k} <b>${v}</b></span>`).join("");
+  const tr = j.trades;
+  $("trades").innerHTML = tr.length ? `<table><thead><tr><th>代號</th><th>名稱</th><th>跳空</th><th>進場</th><th>放空價</th><th>出場</th><th>回補價</th><th>張</th><th>方式</th><th>報酬</th><th>損益</th></tr></thead><tbody>` +
+    tr.map((r, i) => `<tr data-i="${i}" data-sid="${r.stock_id}"><td>${r.stock_id}</td><td>${r.name}</td><td>${pct(r.gap * 100, 1)}</td><td>${hhmm(r.entry_t)}</td><td>${fmt(r.entry_px)}</td>
+      <td>${hhmm(r.exit_t)}</td><td>${fmt(r.exit_px)}</td><td>${r.lots}</td><td>${r.reason.startsWith("停損") ? '<span class="tag stop">停損</span>' : '<span class="tag">收盤</span>'}${r.locked ? ' <span class="tag stop">鎖漲停</span>' : ""}</td>
+      <td class="${cls(r.r_pct)}">${pct(r.r_pct)}</td><td class="${cls(r.pnl)}">${Math.round(r.pnl).toLocaleString()}</td></tr>`).join("") + `</tbody></table>`
+    : `<div class="empty">${s.trade_ok ? "今天沒有股票跌破區間低。" : "今日不交易：" + s.reasons}</div>`;
+  const ot = j.others;
+  $("othsum").textContent = `其他監看 / 剔除 (${ot.length})`;
+  $("others").innerHTML = ot.length ? `<table><thead><tr><th>代號</th><th>名稱</th><th>跳空</th><th>區間低</th><th>區間高</th><th>狀態</th></tr></thead><tbody>` +
+    ot.map((r) => `<tr data-sid="${r.stock_id}"><td>${r.stock_id}</td><td>${r.name}</td><td>${pct(r.gap * 100, 1)}</td><td>${fmt(r.rl)}</td><td>${fmt(r.rh)}</td><td style="color:var(--ink2)">${r.status}</td></tr>`).join("") + `</tbody></table>`
+    : `<div class="empty">無</div>`;
+  cur.rows = [...$("trades").querySelectorAll("tbody tr"), ...$("others").querySelectorAll("tbody tr")];
+  cur.rows.forEach((el) => el.onclick = () => loadStock(el.dataset.sid));
+  const first = sid || (tr[0] && tr[0].stock_id) || (ot[0] && ot[0].stock_id);
+  if (first) { if (!tr.find((r) => r.stock_id === first)) $("othwrap").open = true; loadStock(first); }
+  else { clearCharts(); history.replaceState(null, "", `#${date}`); }
+}
+
+function clearCharts() { iC.setData([]); iV.setData([]); dC.setData([]); dV.setData([]); $("ctitle").textContent = "K 線"; $("lg1").innerHTML = $("lg2").innerHTML = ""; }
+
+async function loadStock(sid) {
+  cur.sid = sid; history.replaceState(null, "", `#${cur.date}/${sid}`);
+  cur.rows.forEach((el) => el.classList.toggle("sel", el.dataset.sid === sid));
+  const j = await DS.bars(cur.date, sid);
+  const f = j.info || {};
+  const [y, m, d] = cur.date.split("-").map(Number); const t0 = Date.UTC(y, m - 1, d, 9, 0) / 1000;
+  IBARS = {};
+  const bars = j.intraday.map(([t, o, h, l, c, v]) => { const tt = t0 + t * 60; IBARS[tt] = { o, h, l, c, v }; return { time: tt, open: o, high: h, low: l, close: c, _v: v }; });
+  LV = (f.rl && f.rh) ? [f.rl, f.rh] : null;
+  iC.setData(bars); iV.setData(bars.map((b) => ({ time: b.time, value: b._v, color: b.close >= b.open ? "rgba(211,58,51,0.45)" : "rgba(26,158,106,0.45)" })));
+  plines.forEach((p) => iC.removePriceLine(p)); plines = [];
+  const pl = (price, color, title, style) => price && plines.push(iC.createPriceLine({ price, color, lineWidth: 1, lineStyle: style, axisLabelVisible: true, title }));
+  pl(f.rh, C.orange, "停損", 2); pl(f.rl, C.blue, "進場", 2); pl(f.pc, C.gray, "昨收", 1); pl(f.force_px, C.violet, "+8%", 1); pl(f.limit_up, C.up, "漲停", 1);
+  const near = (t) => { const tt = t0 + Math.round(t) * 60; if (IBARS[tt]) return tt; const ks = Object.keys(IBARS).map(Number).filter((k) => k <= tt); return ks.length ? Math.max(...ks) : bars[0]?.time; };
+  const mk = [];
+  if (f.entry_t !== undefined && f.entry_t !== null) {
+    mk.push({ time: near(f.entry_t), position: "aboveBar", color: C.blue, shape: "arrowDown", text: `空 ${fmt(f.entry_px)}` });
+    const stop = (f.reason || "").startsWith("停損");
+    mk.push({ time: near(f.exit_t), position: "belowBar", color: stop ? C.orange : "#444", shape: "arrowUp", text: `補 ${fmt(f.exit_px)}` });
+  }
+  iC.setMarkers(mk.sort((a, b) => a.time - b.time));
+  NIB = bars.length; fitIntra();
+  DBARS = {};
+  const db = j.daily.map(([t, o, h, l, c, v]) => { DBARS[t] = { o, h, l, c, v }; return { time: t, open: o, high: h, low: l, close: c, _v: v }; });
+  dC.setData(db); dV.setData(db.map((b) => ({ time: b.time, value: b._v / 1000, color: b.close >= b.open ? "rgba(211,58,51,0.45)" : "rgba(26,158,106,0.45)" })));
+  for (const k in DBARS) DBARS[k].v = Math.round(DBARS[k].v / 1000);
+  dC.setMarkers(db.length ? [{ time: cur.date, position: "aboveBar", color: C.blue, shape: "arrowDown", text: "當日" }] : []);
+  daily.timeScale().fitContent();
+  const res = f.r_pct !== undefined && f.r_pct !== null ? `　${f.reason}　<span class="${cls(f.r_pct)}">${pct(f.r_pct)}</span>` : (f.status ? `　${f.status}` : "");
+  $("ctitle").innerHTML = `${sid} ${f.name || ""}　跳空 ${pct((f.gap || 0) * 100, 1)}　ATR ${fmt((f.atr20 || 0) * 100, 1)}%${res}`;
+  cur.legend1 = `當日 1 分 K　區間 ${fmt(f.rl)} ~ ${fmt(f.rh)}　昨收 ${fmt(f.pc)}`; $("lg1").innerHTML = cur.legend1;
+  cur.legend2 = `日 K (近 80 日)`; $("lg2").innerHTML = cur.legend2;
+}
+
+function stepDay(k) {
+  const only = $("onlytr").checked; let i = BYDATE[cur.date].i;
+  do { i += k; } while (i >= 0 && i < DAYS.length && only && DAYS[i].n_trades === 0);
+  if (i >= 0 && i < DAYS.length) loadDay(DAYS[i].date);
+}
+$("prev").onclick = () => stepDay(-1); $("next").onclick = () => stepDay(1);
+$("month").onchange = () => { const m = $("month").value; const d = DAYS.find((x) => x.date.startsWith(m) && (!$("onlytr").checked || x.n_trades > 0)) || DAYS.find((x) => x.date.startsWith(m)); if (d) loadDay(d.date); };
+$("pick").onchange = () => { const v = $("pick").value; const d = DAYS.find((x) => x.date >= v); if (d) loadDay(d.date); };
+$("onlytr").onchange = () => renderDayList($("month").value);
+document.addEventListener("keydown", (e) => {
+  if (["INPUT", "SELECT"].includes(document.activeElement.tagName)) return;
+  if (e.key === "ArrowLeft") { stepDay(-1); e.preventDefault(); }
+  if (e.key === "ArrowRight") { stepDay(1); e.preventDefault(); }
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    const vis = cur.rows.filter((el) => el.offsetParent !== null); const i = vis.findIndex((el) => el.dataset.sid === cur.sid);
+    const n = vis[i + (e.key === "ArrowDown" ? 1 : -1)]; if (n) { loadStock(n.dataset.sid); n.scrollIntoView({ block: "nearest" }); } e.preventDefault();
+  }
+});
+// ---------- 今日即時 ----------
+const ACTIVE = ["盤前", "等待 09:05", "監看中", "等待收盤", "收盤回補提醒"];
+let liveTimer = null;
+async function loadLive() {
+  let j;
+  try { j = await DS.live(); } catch (e) { $("livebody").textContent = "目前沒有即時資料 (只有交易日 08:50 後才會產生)。"; $("livephase").textContent = ""; return; }
+  const ph = j.phase || ""; $("livephase").textContent = `${j.date}　${ph}`;
+  $("livephase").className = "phase" + (["不交易", "非交易日"].includes(ph) ? " off" : ph === "已結算" ? " done" : "");
+  $("liveupd").textContent = j.updated_at ? `更新 ${j.updated_at.slice(11)}` : "";
+  const inf = [];
+  if (j.mkt_gap !== undefined && j.mkt_gap !== null) inf.push(`大盤跳空 ${pct(j.mkt_gap * 100)}`);
+  if (j.n_cand !== undefined && j.n_cand !== null) inf.push(`候選 ${j.n_cand}`);
+  if (j.n_watch !== undefined && j.n_watch !== null) inf.push(`監看 ${j.n_watch}`);
+  if (j.realized) inf.push(`已實現 ${j.realized.n} 筆 平均 ${pct(j.realized.avg_pct)} 合計 ${Math.round(j.realized.pnl).toLocaleString()} 元`);
+  if (j.note) inf.push(j.note);
+  $("liveinfo").textContent = inf.join("　");
+  let h = "";
+  if (j.watch && j.watch.length) {
+    const ord = { SHORT: 0, STOPPED: 1, CLOSED: 1, WAIT: 2, FULL: 3, EXPIRED: 4 };
+    const rows = [...j.watch].sort((a, b) => (ord[a.state] ?? 9) - (ord[b.state] ?? 9) || (a.entry_t ?? 999) - (b.entry_t ?? 999));
+    h += `<div style="overflow-x:auto"><table><thead><tr><th>代號</th><th>名稱</th><th>跳空</th><th>區間低 (進場)</th><th>區間高 (停損)</th><th>張</th><th>放空價</th><th>出場 / 現價</th><th>損益</th><th>狀態</th></tr></thead><tbody>` +
+      rows.map((r) => `<tr><td>${r.stock_id}</td><td>${r.name}</td><td>${pct(r.gap * 100, 1)}</td><td>${fmt(r.rl)}</td><td>${fmt(r.rh)}</td><td>${r.lots}</td>
+        <td>${r.entry_px ? fmt(r.entry_px) + " <span class='sub'>" + hhmm(r.entry_t) + "</span>" : "–"}</td>
+        <td>${r.exit_px ? fmt(r.exit_px) + " <span class='sub'>" + hhmm(r.exit_t) + "</span>" : fmt(r.last)}</td>
+        <td class="${cls(r.pnl_pct)}">${r.pnl_pct === null || r.pnl_pct === undefined ? "–" : pct(r.pnl_pct)}</td><td class="st-${r.state}">${r.state_txt}</td></tr>`).join("") + `</tbody></table></div>`;
+  } else if (j.candidates && j.candidates.length) {
+    h += `<div>跳空 ≥2% 候選: ${j.candidates.map((c) => `${c.stock_id} ${c.name} (${pct(c.gap * 100, 1)})`).join("、")}</div>`;
+  }
+  if (j.excluded && j.excluded.length) h += `<details style="margin-top:6px"><summary>09:05 剔除 (${j.excluded.length})</summary><div>${j.excluded.map((c) => `${c.stock_id} ${c.name}: ${c.reason}`).join("<br>")}</div></details>`;
+  if (j.events && j.events.length) h += `<details style="margin-top:6px"><summary>事件紀錄 (${j.events.length})</summary><div>${j.events.map((e) => `${e.time} ${e.stock_id} ${e.name} ${e.event} @ ${fmt(e.price)}　${e.note}`).join("<br>")}</div></details>`;
+  $("livebody").innerHTML = h || `<span class="sub">${j.note || ""}</span>`;
+  clearTimeout(liveTimer);
+  if (ACTIVE.includes(ph)) liveTimer = setTimeout(loadLive, 20000);
+}
+
+window.addEventListener("hashchange", () => {
+  const [hd, hs] = decodeURIComponent(location.hash.slice(1)).split("/");
+  if (hd && BYDATE[hd] && hd !== cur.date) loadDay(hd, hs || null);
+  else if (hs && hs !== cur.sid) loadStock(hs);
+});
+init(); loadLive();
+</script>
+</body>
+</html>
