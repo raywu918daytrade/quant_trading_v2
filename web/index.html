@@ -131,10 +131,10 @@ const timeStr = (t) => typeof t === "string" ? t : (t && t.year) ? `${t.year}-${
 // ---------- charts ----------
 const base = { layout: { background: { color: "#ffffff" }, textColor: C.ink2, fontSize: 11 }, grid: { vertLines: { color: C.grid }, horzLines: { color: C.grid } },
   rightPriceScale: { borderColor: "#e6e5e0" }, timeScale: { borderColor: "#e6e5e0" }, crosshair: { mode: 0 } };
-const eq = LightweightCharts.createChart($("eq"), { ...base, timeScale: { ...base.timeScale, visible: false }, handleScroll: false, handleScale: false });
+const eq = LightweightCharts.createChart($("eq"), { ...base, timeScale: { ...base.timeScale, visible: false, minBarSpacing: 0.01 }, handleScroll: false, handleScale: false });
 const eqS = eq.addLineSeries({ color: C.blue, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, priceFormat: { type: "custom", formatter: (v) => Math.round(v).toLocaleString() + " 萬" } });
 const eqM = eq.addLineSeries({ color: "rgba(0,0,0,0)", lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
-const dd = LightweightCharts.createChart($("ddc"), { ...base, handleScroll: false, handleScale: false });
+const dd = LightweightCharts.createChart($("ddc"), { ...base, timeScale: { ...base.timeScale, minBarSpacing: 0.01 }, handleScroll: false, handleScale: false });
 const ddS = dd.addAreaSeries({ lineColor: C.up, topColor: "rgba(211,58,51,0.08)", bottomColor: "rgba(211,58,51,0.35)", lineWidth: 1, invertFilledArea: false, priceLineVisible: false, lastValueVisible: false, priceFormat: { type: "custom", formatter: (v) => v.toFixed(0) + " 萬" } });
 eq.timeScale().subscribeVisibleLogicalRangeChange((r) => r && dd.timeScale().setVisibleLogicalRange(r));
 const jump = (p) => { const t = timeStr(p.time); if (t) loadDay(t, null, true); };
