@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""歷史交易瀏覽網頁 (本機). 用法: python3 scripts/webapp.py [--port 8790]  → 開 http://127.0.0.1:8790
-資料: data/processed/orb_history/ (先跑 scripts/build_history.py)；K 線即時讀 RAW M1 / D1。只綁 127.0.0.1。"""
+"""歷史交易瀏覽網頁 (本機). 用法: python3 scripts/webapp.py [--port 8790] [--live-dir signals]  → 開 http://127.0.0.1:8790
+資料: data/processed/orb_history/ (先跑 scripts/build_history.py)；K 線即時讀 RAW M1 / D1。只綁 127.0.0.1。
+實盤紀錄分頁: 每次請求即時讀 --live-dir (預設 signals/, 即 orb_live.py run 的輸出) 與回測對齊 (export_live.py)。"""
 import argparse, json, math, sys, threading
 from collections import OrderedDict
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -10,9 +11,10 @@ import numpy as np, pandas as pd, pyarrow.parquet as pq, pyarrow.compute as pc
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import orb_live as L
+import export_live as XL
 from config import ROOT, RAW, PROC
 
-HIST = PROC / "orb_history"; WEB = ROOT / "web"
+HIST = PROC / "orb_history"; WEB = ROOT / "web"; LIVE_DIR = ROOT / "signals"
 print("載入歷史 ...", flush=True)
 DAYS = pd.read_parquet(HIST / "days.parquet"); TR = pd.read_parquet(HIST / "trades.parquet"); WT = pd.read_parquet(HIST / "watch.parquet")
 CAP = 300.0                                                   # 萬; 整數張、固定 300 萬不複利 (與 plot_equity.py 預設相同)
@@ -97,6 +99,17 @@ def api_bars(date, sid):
     return dict(intraday=intraday, daily=daily, info=info)
 
 
+def api_live_index():
+    src = XL.LocalSrc(LIVE_DIR)
+    return XL.build_index([XL.compare_day(ds, XL.read_live(src, ds), TR, WT, DAYS)[0] for ds in src.dates()])
+
+
+def api_live_day(date):
+    src = XL.LocalSrc(LIVE_DIR)
+    if date not in src.dates(): return dict(error=f"{date} 沒有實盤檔")
+    return L._jclean(XL.compare_day(date, XL.read_live(src, date), TR, WT, DAYS)[1])
+
+
 class H(BaseHTTPRequestHandler):
     def _send(self, code, body, ctype):
         self.send_response(code); self.send_header("Content-Type", ctype); self.send_header("Cache-Control", "no-store"); self.end_headers(); self.wfile.write(body)
@@ -109,6 +122,8 @@ class H(BaseHTTPRequestHandler):
             if u.path == "/api/days": out = api_days()
             elif u.path == "/api/day": out = api_day(q["date"])
             elif u.path == "/api/bars": out = api_bars(q["date"], q["sid"])
+            elif u.path == "/api/live_index": out = L._jclean(api_live_index())
+            elif u.path == "/api/live_day": out = api_live_day(q["date"])
             elif u.path == "/api/live":
                 lp = ROOT / "signals" / "live.json"
                 if not lp.exists(): return self._send(404, b"{}", "application/json")
@@ -122,6 +137,9 @@ class H(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(); ap.add_argument("--port", type=int, default=8790); a = ap.parse_args()
+    ap = argparse.ArgumentParser(); ap.add_argument("--port", type=int, default=8790)
+    ap.add_argument("--live-dir", default=str(LIVE_DIR), help="實盤檔資料夾 (<date>_trades.csv 等), 預設 signals/")
+    a = ap.parse_args(); LIVE_DIR = Path(a.live_dir)
+    print(f"實盤紀錄讀 {LIVE_DIR}", flush=True)
     print(f"開啟 http://127.0.0.1:{a.port}  (Ctrl+C 結束)", flush=True)
     ThreadingHTTPServer(("127.0.0.1", a.port), H).serve_forever()
