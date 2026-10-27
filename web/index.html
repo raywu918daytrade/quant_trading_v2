@@ -68,7 +68,11 @@
   .tabs button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 6px 14px; font-size: 14px; color: var(--ink2); }
   .tabs button:hover { background: none; color: var(--ink); } .tabs button.on { color: var(--ink); border-bottom-color: var(--blue); font-weight: 600; }
   .recstats { margin: 0 20px 10px; }
-  #receq { height: 200px; }
+  #receq, #ppeq { height: 200px; }
+  #tab-paper .eqhead { flex-wrap: wrap; gap: 2px 12px; }
+  #pprows table.cmp td:last-child, #pprows table.cmp th:last-child { text-align: right; min-width: 0; color: inherit; white-space: nowrap; }
+  #ppdays { max-height: 290px; overflow-y: auto; } #ppdays thead th { position: sticky; top: 0; background: var(--panel); }
+  tr.dim td { color: var(--ink3); } tr.warn td { background: #fff6e8; }
   #tab-rec .eqhead { flex-wrap: wrap; gap: 2px 12px; } .eqkey { display: inline-flex; gap: 12px; white-space: nowrap; } .eqkey i { display: inline-block; width: 14px; height: 0; border-top: 2px solid; vertical-align: middle; margin-right: 4px; }
   .reclayout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; padding: 14px 20px 30px; }
   .tw { overflow-x: auto; } #recdays { max-height: 290px; overflow-y: auto; }
@@ -99,7 +103,7 @@
   <div class="livehead"><h2>今日即時</h2><span id="livephase" class="phase"></span><span id="liveinfo" class="sub"></span><span id="liveupd" class="sub" style="margin-left:auto"></span></div>
   <div id="livebody" class="sub">載入中…</div>
 </section>
-<nav class="tabs"><button data-tab="bt" class="on">歷史回測</button><button data-tab="rec">實盤紀錄</button></nav>
+<nav class="tabs"><button data-tab="bt" class="on">歷史回測</button><button data-tab="rec">實盤紀錄</button><button data-tab="paper">模擬單</button></nav>
 <div id="tab-bt">
 <div class="eqwrap">
   <div class="eqhead"><span>資金曲線 (固定 300 萬、每檔額度 30 萬、整數張、不複利)　點曲線跳到該日</span><span id="eqval"></span></div>
@@ -158,6 +162,34 @@
     </div>
   </div>
 </div>
+<div id="tab-paper" hidden>
+  <div class="chips recstats" id="ppstats"></div>
+  <div class="reclayout">
+    <div class="card">
+      <div class="livehead"><h2>今日模擬單</h2><span id="ppphase" class="phase"></span><span id="ppupd" class="sub" style="margin-left:auto"></span></div>
+      <div id="ppinfo" class="sub" style="margin-bottom:6px"></div>
+      <div class="tw" id="pplive">載入中…</div>
+      <div class="hint">永豐「模擬環境」委託，不是真實下單。訊號價 = 區間低 (進場) / 區間高 (停損) / 收盤價 (收盤回補)；差 (檔) 正 = 成交比訊號不利。盤中有成交時立即上傳，否則約每 3 分鐘，本頁每 20 秒重新讀取。</div>
+    </div>
+  </div>
+  <div id="ppempty" class="empty" style="margin: 0 20px" hidden></div>
+  <div id="ppmain">
+    <div class="eqwrap">
+      <div class="eqhead"><span>累計損益：模擬成交 vs 訊號價 (同一批訊號，以訊號價成交的理想值)　點曲線跳到該日</span>
+        <span class="eqkey"><span><i style="border-color:var(--blue)"></i>模擬成交</span><span><i style="border-color:var(--orange)"></i>訊號價</span><span id="ppeqval"></span></span></div>
+      <div id="ppeq"></div>
+    </div>
+    <div class="reclayout">
+      <div class="card"><h3>每日 (新到舊)</h3><div class="tw" id="ppdays"></div></div>
+      <div class="card"><div class="dayhead"><h2 id="pptitle">逐檔</h2><div class="chips" id="ppchips"></div></div>
+        <div class="tw" id="pprows"></div>
+        <div class="hint">差 (檔) 用台股升降單位計。進場差 = 區間低 − 券賣成交價；出場差 = 回補成交價 − 訊號價 (停損看區間高，收盤看收盤價)。點代號看該股回測 K 線。</div>
+        <details id="pplegw"><summary id="pplegs">每一腳的時間與價格</summary><div class="tw" id="ppleg"></div></details>
+        <details id="ppevw"><summary id="ppevs">事件紀錄</summary><div id="ppev" class="sub"></div></details>
+      </div>
+    </div>
+  </div>
+</div>
 <script>
 const $ = (id) => document.getElementById(id);
 const C = { up: "#d33a33", dn: "#1a9e6a", blue: "#1f6fd1", orange: "#e07a00", violet: "#8e44ad", gray: "#8a8984", grid: "#efeee9", ink2: "#55544f" };
@@ -200,9 +232,12 @@ const recEq = LightweightCharts.createChart($("receq"), { ...base, timeScale: { 
 const wan = { type: "custom", formatter: (v) => (v >= 0 ? "+" : "") + v.toFixed(1) + " 萬" };
 const recL = recEq.addLineSeries({ color: C.blue, lineWidth: 2, priceLineVisible: false, priceFormat: wan });
 const recB = recEq.addLineSeries({ color: C.orange, lineWidth: 2, priceLineVisible: false, priceFormat: wan });
+const ppEq = LightweightCharts.createChart($("ppeq"), { ...base, timeScale: { ...base.timeScale, minBarSpacing: 0.01 }, handleScroll: false, handleScale: false });
+const ppS = ppEq.addLineSeries({ color: C.blue, lineWidth: 2, priceLineVisible: false, priceFormat: wan });
+const ppI = ppEq.addLineSeries({ color: C.orange, lineWidth: 2, priceLineVisible: false, priceFormat: wan });
 function resizeCharts() {
-  for (const [c, el] of [[eq, "eq"], [dd, "ddc"], [intraday, "intra"], [daily, "daily"], [recEq, "receq"]]) if ($(el).clientWidth) c.applyOptions({ width: $(el).clientWidth, height: $(el).clientHeight });
-  eq.timeScale().fitContent(); dd.timeScale().fitContent(); fitIntra(); daily.timeScale().fitContent(); recEq.timeScale().fitContent();
+  for (const [c, el] of [[eq, "eq"], [dd, "ddc"], [intraday, "intra"], [daily, "daily"], [recEq, "receq"], [ppEq, "ppeq"]]) if ($(el).clientWidth) c.applyOptions({ width: $(el).clientWidth, height: $(el).clientHeight });
+  eq.timeScale().fitContent(); dd.timeScale().fitContent(); fitIntra(); daily.timeScale().fitContent(); recEq.timeScale().fitContent(); ppEq.timeScale().fitContent();
 }
 new ResizeObserver(resizeCharts).observe(document.body);
 
@@ -236,7 +271,26 @@ const DS = {
   live: () => getJSON(LIVE_URL + (LIVE_URL.includes("?") ? "&" : "?") + "t=" + Date.now()),
   recIndex: () => LOCAL ? getJSON("/api/live_index") : getJSON(DATA + "live_index.json?t=" + Date.now()),
   recDay: (d) => LOCAL ? getJSON(`/api/live_day?date=${d}`) : getJSON(DATA + `live/${d}.json?t=` + Date.now()),
+  // 模擬單: paper_orb.py 的輸出 (雲端 HF db/orb/paper/，本機 webapp.py 的 /paper/)。?paper=<網址> 可指定 (測試用)
+  paperCSV: async (f) => { const r = await fetch(PAPER + f + "?t=" + Date.now()); if (!r.ok) throw new Error(r.status + " " + f); return parseCSV(await r.text()); },
+  paperLive: () => getJSON(PAPER + "live.json?t=" + Date.now()),
 };
+const PAPER = QS.get("paper") || (LOCAL ? "/paper/" : HF_ORB + "paper/");
+function parseCSV(t) {          // pandas to_csv 輸出 (可能有 BOM、引號欄位)
+  t = t.replace(/^\uFEFF/, ""); const rows = []; let row = [], f = "", q = false;
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (q) { if (c === '"') { if (t[i + 1] === '"') { f += '"'; i++; } else q = false; } else f += c; }
+    else if (c === '"') q = true;
+    else if (c === ",") { row.push(f); f = ""; }
+    else if (c === "\n" || c === "\r") { if (c === "\r" && t[i + 1] === "\n") i++; row.push(f); rows.push(row); row = []; f = ""; }
+    else f += c;
+  }
+  if (f !== "" || row.length) { row.push(f); rows.push(row); }
+  const h = rows.shift() || [];
+  return rows.filter((r) => r.length > 1 || r[0] !== "").map((r) => Object.fromEntries(h.map((k, i) => [k, r[i] ?? ""])));
+}
+const num = (v) => (v === "" || v === null || v === undefined || !Number.isFinite(+v)) ? null : +v;
 async function init() {
   const j = await DS.days();
   DAYS = j.days; DAYS.forEach((d, i) => { d.i = i; BYDATE[d.date] = d; });
@@ -252,7 +306,7 @@ async function init() {
   $("pick").min = DAYS[0].date; $("pick").max = DAYS[DAYS.length - 1].date;
   const [hd, hs] = decodeURIComponent(location.hash.slice(1)).split("/");
   const last = [...DAYS].reverse().find((d) => d.n_trades > 0);
-  if (hd === "rec") { loadDay(last.date, null, false, true); showTab("rec", hs || null); }
+  if (hd === "rec" || hd === "paper") { loadDay(last.date, null, false, true); showTab(hd, hs || null); }
   else loadDay(BYDATE[hd] ? hd : last.date, hs || null);
 }
 
@@ -390,6 +444,7 @@ async function loadLive() {
 window.addEventListener("hashchange", () => {
   const [hd, hs] = decodeURIComponent(location.hash.slice(1)).split("/");
   if (hd === "rec") { if (TAB !== "rec" || (hs && hs !== REC.date)) showTab("rec", hs || null); return; }
+  if (hd === "paper") { if (TAB !== "paper" || (hs && hs !== PP.date)) showTab("paper", hs || null); return; }
   if (TAB !== "bt") showTab("bt");
   if (hd && BYDATE[hd] && hd !== cur.date) loadDay(hd, hs || null);
   else if (hs && hs !== cur.sid) loadStock(hs);
@@ -402,8 +457,9 @@ document.querySelectorAll(".tabs button").forEach((b) => b.onclick = () => showT
 async function showTab(t, recDate = null) {
   TAB = t;
   document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("on", b.dataset.tab === t));
-  $("tab-bt").hidden = t !== "bt"; $("tab-rec").hidden = t !== "rec";
+  $("tab-bt").hidden = t !== "bt"; $("tab-rec").hidden = t !== "rec"; $("tab-paper").hidden = t !== "paper";
   resizeCharts();
+  if (t === "paper") return showPaper(recDate);
   if (t === "bt") { if (cur.date) history.replaceState(null, "", `#${cur.date}` + (cur.sid ? `/${cur.sid}` : "")); return; }
   if (!REC.idx) await loadRecIndex();
   const days = REC.idx ? REC.idx.days : [];
@@ -469,6 +525,138 @@ async function loadRecDay(date) {
   $("recev").innerHTML = j.events.map((e) => `${e.time} ${e.stock_id} ${e.name} ${e.event} @ ${fmt(e.price)}　${e.note}`).join("<br>") || "無";
   $("recexs").textContent = `實盤 09:05 剔除 (${j.excluded.length})`;
   $("recex").innerHTML = j.excluded.map((e) => `${e.stock_id} ${e.name}: ${e.reason}`).join("<br>") || "無";
+}
+// ---------- 模擬單 (永豐模擬環境) ----------
+const PP = { days: null, by: {}, date: null, timer: null };
+const PP_ACTIVE = ["等待 09:05", "監看中", "等待收盤"];
+const tk1 = (v) => v === null || v === undefined ? "–" : (v > 0 ? "+" : "") + (Math.round(v * 10) / 10);
+const hms8 = (s) => s ? String(s).slice(0, 8) : "";
+const secs = (ms) => ms === null || ms === undefined ? "–" : (ms / 1000).toFixed(ms < 10000 ? 2 : 1) + " 秒";
+const LEG = { entry: "進場", stop: "停損", close: "收盤" }, SIDE = { Sell: "券賣", Buy: "買回" };
+async function showPaper(date) {
+  loadPaperLive();
+  if (!PP.days) await loadPaperIndex();
+  if (!PP.days.length) { history.replaceState(null, "", "#paper"); return; }
+  loadPaperDay(date && PP.by[date] ? date : PP.date || PP.days[PP.days.length - 1].date);
+}
+async function loadPaperLive() {
+  clearTimeout(PP.timer);
+  let j;
+  try { j = await DS.paperLive(); } catch (e) {
+    $("ppphase").textContent = $("ppupd").textContent = $("ppinfo").textContent = "";
+    $("pplive").innerHTML = `<div class="empty">目前沒有模擬單資料 (交易日 08:50 後才會產生)。</div>`; return;
+  }
+  const ph = j.phase || ""; $("ppphase").textContent = `${j.date}　${ph}`;
+  $("ppphase").className = "phase" + (["不交易", "非交易日"].includes(ph) ? " off" : ph === "已結算" ? " done" : "");
+  $("ppupd").textContent = j.updated_at ? `更新 ${j.updated_at.slice(11)}` : "";
+  const inf = [];
+  if (j.mkt_gap !== undefined && j.mkt_gap !== null) inf.push(`大盤跳空 ${pct(j.mkt_gap * 100)}`);
+  if (j.n_cand !== undefined && j.n_cand !== null) inf.push(`候選 ${j.n_cand}`);
+  if (j.n_watch !== undefined && j.n_watch !== null) inf.push(`監看 ${j.n_watch}`);
+  if (j.slot) inf.push(`每檔額度 ${Math.round(j.slot / 1e4)} 萬`);
+  if (j.note) inf.push(j.note);
+  $("ppinfo").textContent = inf.join("　");
+  const ps = j.positions || []; let h = "";
+  if (ps.length) {
+    const ord = { SHORT: 0, STOPPED: 1, CLOSED: 1, WAIT: 2, FULL: 3, EXPIRED: 4 };
+    const all = [...ps].sort((a, b) => (ord[a.state] ?? 9) - (ord[b.state] ?? 9));
+    const tbl = (rows) => `<table><thead><tr><th>代號</th><th>名稱</th><th>區間低 (訊號)</th><th>區間高 (停損)</th><th>張</th><th>券賣成交</th><th>進場差 (檔)</th><th>回補成交</th><th>現價</th><th>損益</th><th>狀態</th></tr></thead><tbody>` +
+      rows.map((r) => `<tr class="${r.skipped ? "dim" : ""}"><td>${r.stock_id}</td><td>${r.name}</td><td>${fmt(r.rl)}</td><td>${fmt(r.rh)}</td><td>${r.lots}</td>
+        <td>${r.sell_px ? fmt(r.sell_px) + (r.sell_lots && r.sell_lots !== r.lots ? ` <span class="sub">${r.sell_lots} 張</span>` : "") : "–"}</td><td>${tk1(r.entry_slip_ticks)}</td>
+        <td>${r.buy_px ? fmt(r.buy_px) : "–"}</td><td>${fmt(r.last)}</td><td class="${cls(r.pnl_pct)}">${r.pnl_pct === null || r.pnl_pct === undefined ? "–" : pct(r.pnl_pct)}</td>
+        <td class="st-${r.state}">${r.skipped ? "不下單：" + r.skipped : r.state_txt}</td></tr>`).join("") + `</tbody></table>`;
+    const act = all.filter((r) => r.sell_px), rest = all.filter((r) => !r.sell_px);
+    h += act.length ? tbl(act) : `<div class="empty">還沒有成交的部位。</div>`;
+    if (rest.length) h += `<details style="margin-top:6px"${act.length ? "" : " open"}><summary>其他監看 (等待跌破 / 額滿 / 不下單) (${rest.length})</summary>${tbl(rest)}</details>`;
+  }
+  const ev = j.events || [];
+  if (ev.length) h += `<details style="margin-top:6px"><summary>事件紀錄 (${ev.length})</summary><div class="sub">${ev.map((e) => `${hms8(e.tick_time || e.time)} ${e.stock_id} ${e.name} ${e.event} @ ${fmt(e.price)}　${e.note || ""}`).join("<br>")}</div></details>`;
+  $("pplive").innerHTML = h || `<div class="empty">${j.note || ph || "無"}</div>`;
+  if (PP_ACTIVE.includes(ph) && TAB === "paper") PP.timer = setTimeout(loadPaperLive, 20000);
+}
+async function loadPaperIndex() {
+  let rows = [];
+  try { rows = await DS.paperCSV("summary.csv"); } catch (e) { }
+  const K = ["mkt_gap_pct", "n_cand", "n_watch", "n_signal", "n_filled", "n_stop", "n_close", "n_unclosed", "n_skipped", "n_full", "entry_slip_ticks", "entry_trigger_ticks",
+    "entry_exec_ticks", "stop_slip_ticks", "close_slip_ticks", "detect_ms_median", "tick_to_fill_ms_median", "sim_avg_net_pct", "ideal_avg_net_pct", "sim_pnl", "ideal_pnl"];
+  let cs = 0, ci = 0;
+  PP.days = rows.filter((r) => /^\d{4}-\d\d-\d\d$/.test(r.date)).sort((a, b) => a.date < b.date ? -1 : 1).map((r) => {
+    const d = { ...r, trade_ok: r.trade_ok === "True" }; K.forEach((k) => d[k] = num(r[k]));
+    cs += d.sim_pnl || 0; ci += d.ideal_pnl || 0; d.cum_sim = cs; d.cum_ideal = ci; return d;
+  });
+  const days = PP.days; PP.by = {}; days.forEach((d) => PP.by[d.date] = d);
+  $("ppmain").hidden = !days.length; $("ppempty").hidden = !!days.length;
+  if (!days.length) {
+    $("ppstats").innerHTML = "";
+    $("ppempty").innerHTML = "還沒有模擬單紀錄。<br>雲端 paper.yml 每個交易日 08:50 自動執行，13:35 結算後把當天成交上傳到 HF，之後就會出現在這裡。";
+    return;
+  }
+  const sum = (k, ds = days) => ds.reduce((a, d) => a + (d[k] || 0), 0);
+  const wavg = (k, w) => { const ds = days.filter((d) => d[k] !== null && d[w]); const n = sum(w, ds); return n ? ds.reduce((a, d) => a + d[k] * d[w], 0) / n : null; };
+  const t2f = days.filter((d) => d.tick_to_fill_ms_median !== null);
+  const ch = [["期間", `${days[0].date} ~ ${days[days.length - 1].date}`], ["天數", `${days.length} (有成交 ${days.filter((d) => d.n_filled).length})`],
+    ["成交", sum("n_filled") + " 筆"], ["停損", sum("n_stop")], ["模擬累計", wanStr(cs)], ["訊號價累計", wanStr(ci)], ["差", wanStr(cs - ci)],
+    ["平均進場差", tk1(wavg("entry_slip_ticks", "n_filled")) + " 檔"], ["平均停損差", tk1(wavg("stop_slip_ticks", "n_stop")) + " 檔"],
+    ["觸價到成交 (中位)", t2f.length ? secs(t2f.reduce((a, d) => a + d.tick_to_fill_ms_median, 0) / t2f.length) : "–"]];
+  if (sum("n_skipped")) ch.push(["不下單", sum("n_skipped")]);
+  if (sum("n_unclosed")) ch.push(["⚠ 未回補", sum("n_unclosed")]);
+  $("ppstats").innerHTML = ch.map(([k, v]) => `<span class="chip">${k} <b>${v}</b></span>`).join("");
+  ppS.setData(days.map((d) => ({ time: d.date, value: d.cum_sim / 1e4 })));
+  ppI.setData(days.map((d) => ({ time: d.date, value: d.cum_ideal / 1e4 })));
+  ppEq.timeScale().fitContent();
+  $("ppdays").innerHTML = `<table class="dl"><thead><tr><th>日期</th><th>成交 / 訊號</th><th>停損</th><th>進場差 (檔)</th><th>停損差 (檔)</th><th>模擬損益</th><th>訊號價損益</th><th>差</th><th>備註</th></tr></thead><tbody>` +
+    [...days].reverse().map((d) => {
+      const note = [!d.trade_ok ? d.reasons : "", d.n_skipped ? `不下單 ${d.n_skipped}` : "", d.n_unclosed ? `⚠ 未回補 ${d.n_unclosed}` : ""].filter(Boolean).join("，");
+      const diff = d.sim_pnl === null ? null : d.sim_pnl - (d.ideal_pnl || 0);
+      return `<tr data-d="${d.date}" class="${d.n_unclosed ? "warn" : !d.trade_ok ? "dim" : ""}"><td>${d.date.slice(5)} (${wd(d.date)})</td><td>${d.n_filled ?? 0} / ${(d.n_signal || 0) - (d.n_full || 0)}</td><td>${d.n_stop ?? 0}</td>
+        <td>${tk1(d.entry_slip_ticks)}</td><td>${tk1(d.stop_slip_ticks)}</td><td>${yuan(d.sim_pnl)}</td><td>${yuan(d.ideal_pnl)}</td><td>${yuan(diff)}</td><td>${note}</td></tr>`;
+    }).join("") + `</tbody></table>`;
+  $("ppdays").querySelectorAll("tbody tr").forEach((el) => el.onclick = () => loadPaperDay(el.dataset.d));
+}
+ppEq.subscribeClick((p) => { const t = timeStr(p.time); if (t && PP.by[t]) loadPaperDay(t); });
+ppEq.subscribeCrosshairMove((p) => { const t = timeStr(p.time); const d = t && PP.by[t];
+  $("ppeqval").innerHTML = d ? `${t}　模擬 ${wanStr(d.cum_sim)}　訊號價 ${wanStr(d.cum_ideal)}` : ""; });
+
+async function loadPaperDay(date) {
+  PP.date = date; history.replaceState(null, "", `#paper/${date}`);
+  $("ppdays").querySelectorAll("tbody tr").forEach((el) => el.classList.toggle("sel", el.dataset.d === date));
+  $("pptitle").textContent = `${date} (週${wd(date)})`;
+  const d = PP.by[date];
+  const ch = [["大盤跳空", d.mkt_gap_pct === null ? "–" : pct(d.mkt_gap_pct)], ["候選", d.n_cand ?? "–"], ["監看", d.n_watch ?? "–"], ["成交", d.n_filled ?? 0], ["停損", d.n_stop ?? 0],
+    ["模擬", yuan(d.sim_pnl)], ["訊號價", yuan(d.ideal_pnl)]];
+  if (d.entry_trigger_ticks !== null) ch.push(["進場差拆解", `觸發 ${tk1(d.entry_trigger_ticks)} + 執行 ${tk1(d.entry_exec_ticks)} 檔`]);
+  if (d.detect_ms_median !== null) ch.push(["收到行情延遲 (中位)", secs(d.detect_ms_median)]);
+  if (d.tick_to_fill_ms_median !== null) ch.push(["觸價到成交 (中位)", secs(d.tick_to_fill_ms_median)]);
+  if (!d.trade_ok) ch.push(["不交易", d.reasons]);
+  $("ppchips").innerHTML = ch.map(([k, v]) => `<span class="chip">${k} <b>${v}</b></span>`).join("");
+  const [tr, lg, ev] = await Promise.all(["trades", "slippage", "events"].map((k) => DS.paperCSV(`${date}_${k}.csv`).catch(() => [])));
+  if (PP.date !== date) return;
+  const hasBt = !!BYDATE[date];
+  const rows = tr.map((r) => ({ ...r, ...Object.fromEntries(["rl", "rh", "lots", "sell_px", "sell_lots", "buy_px", "close_px", "entry_slip_ticks", "exit_slip_ticks", "sim_net_pct", "ideal_net_pct", "sim_pnl"].map((k) => [k, num(r[k])])) }))
+    .sort((a, b) => (a.sell_px ? 0 : 1) - (b.sell_px ? 0 : 1) || (a.sell_time || "~").localeCompare(b.sell_time || "~"));
+  const how = (r) => r.exit_leg === "stop" ? '<span class="tag stop">停損</span>' : r.exit_leg === "close" ? '<span class="tag">收盤</span>' : "";
+  const at = (px, t) => px ? `${fmt(px)} <span class="sub">${hms8(t)}</span>` : "–";
+  const done = rows.filter((r) => r.sell_px), miss = rows.filter((r) => !r.sell_px);
+  $("pprows").innerHTML = (done.length ? `<table class="cmp"><thead>
+    <tr><th></th><th></th><th></th><th class="grp sep" colspan="3">進場 (券賣)</th><th class="grp sep" colspan="4">出場 (買回)</th><th class="grp sep" colspan="3">報酬 (含成本)</th></tr>
+    <tr><th>代號</th><th>名稱</th><th>張</th><th class="sep">訊號價</th><th>成交價</th><th>差 (檔)</th><th class="sep">方式</th><th>訊號價</th><th>成交價</th><th>差 (檔)</th><th class="sep">模擬</th><th>訊號價</th><th>模擬損益</th></tr></thead><tbody>` +
+    done.map((r) => {
+      const x = r.exit_leg === "stop" ? r.rh : r.exit_leg === "close" ? r.close_px : null;
+      const dim = !r.sell_px; const st = r.status || "";
+      return `<tr class="${st === "未回補" ? "warn" : dim ? "dim" : ""}"><td>${hasBt ? `<a class="sid" href="#${date}/${r.stock_id}" title="看回測 K 線">${r.stock_id}</a>` : r.stock_id}</td><td>${r.name}</td><td>${r.sell_lots || r.lots || ""}</td>
+        <td class="sep">${fmt(r.rl)}</td><td>${at(r.sell_px, r.sell_time)}</td><td>${tk1(r.entry_slip_ticks)}</td>
+        <td class="sep">${dim ? `<span class="sub">${st}</span>` : how(r) || st}</td><td>${dim ? "–" : fmt(x)}</td><td>${at(r.buy_px, r.buy_time)}</td><td>${tk1(r.exit_slip_ticks)}</td>
+        <td class="sep">${r.sim_net_pct === null ? "–" : rpc(r.sim_net_pct)}</td><td>${r.ideal_net_pct === null || dim ? "–" : rpc(r.ideal_net_pct)}</td><td>${yuan(r.sim_pnl)}</td></tr>`;
+    }).join("") + `</tbody></table>`
+    : `<div class="empty">${!d.trade_ok ? "今日不交易：" + d.reasons : miss.length ? "這天沒有成交。" : "這天沒有跌破訊號。"}</div>`) +
+    (miss.length ? `<details style="margin-top:6px"><summary>跌破但沒進場 (${miss.length})</summary><div class="sub">${miss.map((r) => `${r.stock_id} ${r.name}　區間低 ${fmt(r.rl)}　${r.status || ""}`).join("<br>")}</div></details>` : "");
+  $("pplegs").textContent = `每一腳的時間與價格 (${lg.length})`;
+  $("ppleg").innerHTML = lg.length ? `<table class="cmp"><thead><tr><th>代號</th><th>名稱</th><th>腳</th><th>張</th><th>訊號價</th><th>觸發價</th><th>成交價</th><th>差 (檔)</th><th>觸發差</th><th>執行差</th><th>觸發 tick</th><th>下單</th><th>成交</th><th>觸價到成交</th><th>委託狀態</th></tr></thead><tbody>` +
+    lg.map((r) => `<tr class="${r.filled === "True" ? "" : "dim"}"><td>${r.stock_id}</td><td>${r.name}</td><td>${LEG[r.leg] || r.leg} ${SIDE[r.side] || r.side}</td><td>${r.lots}</td>
+      <td>${fmt(num(r.signal_px))}</td><td>${fmt(num(r.trigger_px))}</td><td>${fmt(num(r.fill_px))}</td><td>${tk1(num(r.slip_ticks))}</td><td>${tk1(num(r.trigger_slip_ticks))}</td><td>${tk1(num(r.exec_slip_ticks))}</td>
+      <td>${hms8(r.tick_time)}</td><td>${hms8(r.order_time)}</td><td>${hms8(r.fill_time)}</td><td>${secs(num(r.tick_to_fill_ms))}</td><td>${r.order_status || ""}</td></tr>`).join("") + `</tbody></table>` : `<div class="empty">無</div>`;
+  $("ppevs").textContent = `事件紀錄 (${ev.length})`;
+  $("ppev").innerHTML = ev.map((e) => `${hms8(e.tick_time || e.time)} ${e.stock_id} ${e.name} ${e.event} @ ${fmt(num(e.price))}　${e.note || ""}`).join("<br>") || "無";
 }
 init(); loadLive();
 </script>

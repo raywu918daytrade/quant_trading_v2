@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """歷史交易瀏覽網頁 (本機). 用法: python3 scripts/webapp.py [--port 8790] [--live-dir signals]  → 開 http://127.0.0.1:8790
 資料: data/processed/orb_history/ (先跑 scripts/build_history.py)；K 線即時讀 RAW M1 / D1。只綁 127.0.0.1。
-實盤紀錄分頁: 每次請求即時讀 --live-dir (預設 signals/, 即 orb_live.py run 的輸出) 與回測對齊 (export_live.py)。"""
-import argparse, json, math, sys, threading
+實盤紀錄分頁: 每次請求即時讀 --live-dir (預設 signals/, 即 orb_live.py run 的輸出) 與回測對齊 (export_live.py)。
+模擬單分頁: /paper/<檔名> 直接讀 --paper-dir (預設 paper/, 即 paper_orb.py run 的輸出: live.json、summary.csv、<date>_trades.csv 等)。"""
+import argparse, json, math, re, sys, threading
 from collections import OrderedDict
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -14,7 +15,7 @@ import orb_live as L
 import export_live as XL
 from config import ROOT, RAW, PROC
 
-HIST = PROC / "orb_history"; WEB = ROOT / "web"; LIVE_DIR = ROOT / "signals"
+HIST = PROC / "orb_history"; WEB = ROOT / "web"; LIVE_DIR = ROOT / "signals"; PAPER_DIR = ROOT / "paper"
 print("載入歷史 ...", flush=True)
 DAYS = pd.read_parquet(HIST / "days.parquet"); TR = pd.read_parquet(HIST / "trades.parquet"); WT = pd.read_parquet(HIST / "watch.parquet")
 CAP = 300.0                                                   # 萬; 整數張、固定 300 萬不複利 (與 plot_equity.py 預設相同)
@@ -124,6 +125,10 @@ class H(BaseHTTPRequestHandler):
             elif u.path == "/api/bars": out = api_bars(q["date"], q["sid"])
             elif u.path == "/api/live_index": out = L._jclean(api_live_index())
             elif u.path == "/api/live_day": out = api_live_day(q["date"])
+            elif u.path.startswith("/paper/"):                    # 模擬單分頁: 直接回傳 paper_orb.py 的輸出檔
+                name = u.path[len("/paper/"):]; p = PAPER_DIR / name
+                if not re.fullmatch(r"[\w.-]+\.(csv|json)", name) or not p.is_file(): return self._send(404, b"not found", "text/plain")
+                return self._send(200, p.read_bytes(), ("text/csv" if name.endswith(".csv") else "application/json") + "; charset=utf-8")
             elif u.path == "/api/live":
                 lp = ROOT / "signals" / "live.json"
                 if not lp.exists(): return self._send(404, b"{}", "application/json")
@@ -139,7 +144,8 @@ class H(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(); ap.add_argument("--port", type=int, default=8790)
     ap.add_argument("--live-dir", default=str(LIVE_DIR), help="實盤檔資料夾 (<date>_trades.csv 等), 預設 signals/")
-    a = ap.parse_args(); LIVE_DIR = Path(a.live_dir)
+    ap.add_argument("--paper-dir", default=str(PAPER_DIR), help="模擬單檔資料夾 (paper_orb.py 的輸出), 預設 paper/")
+    a = ap.parse_args(); LIVE_DIR = Path(a.live_dir); PAPER_DIR = Path(a.paper_dir)
     print(f"實盤紀錄讀 {LIVE_DIR}", flush=True)
     print(f"開啟 http://127.0.0.1:{a.port}  (Ctrl+C 結束)", flush=True)
     ThreadingHTTPServer(("127.0.0.1", a.port), H).serve_forever()

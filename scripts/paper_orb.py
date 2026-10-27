@@ -433,10 +433,14 @@ def summarize(ds, info, trades, legs, n_watch, mode):
 
 def write_day(ds, trades, legs, events, summ, out=PAPER):
     out.mkdir(parents=True, exist_ok=True)
-    trades.to_csv(out / f"{ds}_trades.csv", index=False, encoding="utf-8-sig", float_format="%.4g")
+    trades.to_csv(out / f"{ds}_trades.csv", index=False, encoding="utf-8-sig", float_format="%.10g")
     legs.to_csv(out / f"{ds}_slippage.csv", index=False, encoding="utf-8-sig")
     pd.DataFrame([{k: (hms(v) if isinstance(v, datetime) else v) for k, v in e.items()} for e in events]).to_csv(out / f"{ds}_events.csv", index=False, encoding="utf-8-sig")
     (out / f"{ds}_summary.json").write_text(json.dumps(OL._jclean(summ), ensure_ascii=False, indent=1), encoding="utf-8")
+    # 本機累計 summary.csv (網頁「模擬單」分頁的每日清單; 雲端版由 Pub.day 在 HF 上累計, 本機這份不上傳)
+    sp = out / "summary.csv"; hist = pd.read_csv(sp, dtype=str) if sp.exists() else pd.DataFrame()
+    if len(hist) and "date" in hist: hist = hist[hist.date != ds]
+    pd.concat([hist, pd.DataFrame([OL._jclean(summ)])], ignore_index=True).sort_values("date").to_csv(sp, index=False)
 
 class Pub:
     """paper 狀態上傳 HF db/orb/paper/ (同 orb_live.Publisher 的做法: token 只從環境變數讀, 不印出)."""
