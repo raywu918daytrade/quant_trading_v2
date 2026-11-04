@@ -44,7 +44,8 @@ TAG = "orbv2"                 # custom_field (≤6 字): 同一個模擬帳戶�
 SIMULATION = True             # 安全常數: 改成 False 程式會拒絕執行
 AUCTION_T = (13, 25, 10)      # 收盤集合競價開始後, 剩餘部位以漲停價限價買回
 END_T = (13, 35, 0)
-LIVE_EVERY = 180              # 盤中至少每 3 分鐘上傳一次 live.json (有事件立即上傳)
+LIVE_EVERY = 180              # 盤中至少每 3 分鐘上傳一次 live.json
+EVENT_GAP = 120               # 有事件時最快每 2 分鐘上傳一次 (HF 每個 repo 每小時最多 128 個 commit, live / paper / v1 共用)
 
 
 def now(): return datetime.now(TZ)
@@ -350,8 +351,10 @@ class PaperOrb:
                 if p["state"] == "WAIT" and t >= OL.P["DEADLINE"] + 1: p["state"] = "EXPIRED"
 
     # ---- 結算 ----
-    def settle(self):
+    def settle(self, real_closes=None):
         closes = {sid: self.last.get(sid, np.nan) for sid in self.book.s}
+        for sid, px in (real_closes or {}).items():                     # 13:31 後 MIS 的收盤價優先 (最後一筆 tick 可能漏收)
+            if sid in closes and px is not None and np.isfinite(px): closes[sid] = float(px)
         self.book.close_all(closes)                                    # Book 的理論結果: 進場 = 觸發 tick, 收盤 = 最後一筆 tick
         bk = self.book.trades(); bk = bk.set_index("stock_id") if len(bk) else bk
         trades, legs = [], []
@@ -360,7 +363,12 @@ class PaperOrb:
             w = self.w[sid]; E = self.leg.get(sid, {}).get("entry", {}); X = self.leg.get(sid, {}).get("exit", {})
             sell_px, sell_q, sell_t = self.filled((sid, "Sell")); buy_px, buy_q, buy_t = self.filled((sid, "Buy"))
             close_px = closes.get(sid, np.nan)
-            if X.get("leg") == "close": X["signal_px"] = close_px
+            broker_buy_px = buy_px
+            if X.get("leg") == "close":
+                X["signal_px"] = close_px
+                # 收盤集合競價的成交價就是收盤價; 永豐模擬環境的收盤回報價不可靠 (2026-11-04: 順達 283.5 vs 收盤 271.5、合晶 77.4 vs 83.5),
+                # 所以收盤腳以真實收盤價結算, 模擬回報價另存 broker_buy_px 供對照。
+                if buy_px and np.isfinite(close_px): buy_px = float(close_px)
             # 回測口徑 (理想): 進場 = 區間低, 停損 = 區間高 ×(1+0.1%), 收盤 = 收盤價
             ideal_exit = w["rh"] * (1 + OL.P["STOP_SLIP"]) if X.get("leg") == "stop" else close_px
             r_ideal = 1 - ideal_exit / w["rl"] - COST if (E and np.isfinite(ideal_exit)) else np.nan
@@ -374,20 +382,21 @@ class PaperOrb:
             else: status = {"stop": "停損", "close": "收盤回補"}.get(X.get("leg"), X.get("leg", ""))
             trades.append(dict(date=self.ds, stock_id=sid, name=w["name"], pc=w["pc"], gap=round(w["gap"] * 100, 2), rl=w["rl"], rh=w["rh"], lots=w["lots"],
                                status=status, exit_leg=X.get("leg", ""),
-                               sell_px=sell_px, sell_lots=sell_q, sell_time=hms(sell_t), buy_px=buy_px, buy_lots=buy_q, buy_time=hms(buy_t), close_px=close_px,
+                               sell_px=sell_px, sell_lots=sell_q, sell_time=hms(sell_t), buy_px=buy_px, buy_lots=buy_q, buy_time=hms(buy_t), close_px=close_px, broker_buy_px=broker_buy_px,
                                entry_slip_ticks=ticks_between(w["rl"], sell_px) if sell_px else None,
                                exit_slip_ticks=ticks_between(buy_px, X.get("signal_px")) if (buy_px and X) else None,
                                sim_net_pct=r_sim * 100, sim_pnl=pnl,
                                book_net_pct=bk.loc[sid, "r_pct"] if len(bk) and sid in bk.index else np.nan,
                                ideal_net_pct=r_ideal * 100, ideal_pnl=r_ideal * w["rl"] * 1000 * w["lots"]))
             for name, L, act, fpx, fq, ft in [("entry", E, "Sell", sell_px, sell_q, sell_t), ("exit", X, "Buy", buy_px, buy_q, buy_t)]:
+                broker_px = broker_buy_px if name == "exit" else fpx
                 if not L: continue
                 sig, trig = L.get("signal_px"), L.get("trigger_px")
                 sgn = 1 if act == "Sell" else -1                        # 正 = 不利: 賣低了 / 買高了
                 def slip(a, b): return round(sgn * (a - b), 4) + 0.0 if (a is not None and b is not None and np.isfinite(a) and np.isfinite(b)) else None
                 def tks(a, b): x = ticks_between(a, b); return None if x is None else sgn * x + 0.0
                 legs.append(dict(date=self.ds, stock_id=sid, name=w["name"], leg=L.get("leg", "entry"), side=act, lots=fq or 0,
-                                 signal_px=sig, trigger_px=trig, fill_px=fpx,
+                                 signal_px=sig, trigger_px=trig, fill_px=fpx, broker_fill_px=broker_px,
                                  slip_yuan=slip(sig, fpx), slip_ticks=tks(sig, fpx), slip_pct=(slip(sig, fpx) / sig * 100) if (slip(sig, fpx) is not None and sig) else None,
                                  trigger_slip_ticks=tks(sig, trig), exec_slip_ticks=tks(trig, fpx),
                                  tick_size=OL.tick_size(sig) if sig is not None and np.isfinite(sig) else None,
@@ -444,8 +453,9 @@ def write_day(ds, trades, legs, events, summ, out=PAPER):
 
 class Pub:
     """paper 狀態上傳 HF db/orb/paper/ (同 orb_live.Publisher 的做法: token 只從環境變數讀, 不印出)."""
-    def __init__(self, enabled, min_gap=LIVE_EVERY):
-        self.enabled, self.min_gap, self.last, self.api = enabled, min_gap, 0.0, None
+    def __init__(self, enabled, min_gap=LIVE_EVERY, event_gap=EVENT_GAP):
+        self.enabled, self.min_gap, self.event_gap, self.last, self.api = enabled, min_gap, event_gap, 0.0, None
+        self.pending = False
         if enabled:
             tok = os.environ.get("HF_TOKEN")
             if not tok: log("⚠ --publish 但沒有 HF_TOKEN, 只寫本機 paper/"); self.enabled = False
@@ -453,12 +463,16 @@ class Pub:
                 from huggingface_hub import HfApi
                 self.api = HfApi(token=tok)
 
-    def live(self, state, force=False):
+    def live(self, state, force=False, event=False):
+        """force: 階段變化 (一定上傳); event: 有新事件 (最快每 event_gap 秒, 被擋下的會在之後補傳); 其餘每 min_gap 秒。"""
         PAPER.mkdir(exist_ok=True); p = PAPER / "live.json"
         state = {**state, "updated_at": now().strftime("%Y-%m-%d %H:%M:%S")}
         p.write_text(json.dumps(OL._jclean(state), ensure_ascii=False, default=OL._jdefault, allow_nan=False), encoding="utf-8")
-        if not self.enabled or (not force and time.time() - self.last < self.min_gap): return
-        self.last = time.time()
+        if not self.enabled: return
+        self.pending = self.pending or event
+        gap = time.time() - self.last
+        if not (force or gap >= self.min_gap or (self.pending and gap >= self.event_gap)): return
+        self.last = time.time(); self.pending = False
         for k in range(3):
             try:
                 self.api.upload_file(path_or_fileobj=str(p), path_in_repo=f"{HF_PAPER}/live.json", repo_id=HF_REPO, repo_type="dataset",
@@ -575,8 +589,8 @@ def cmd_run(a):
     while now() < t_auc:
         po.process(0.5); po.reconcile(); po.expire(OL.tmin(now()))
         if time.time() - last_sync >= 30: po.sync_deals(); last_sync = time.time()
-        if po.dirty or time.time() - last_push >= LIVE_EVERY:
-            pub.live(state("監看中"), force=po.dirty); po.dirty = False; last_push = time.time()
+        if po.dirty or time.time() - last_push >= 10:
+            pub.live(state("監看中"), event=po.dirty); po.dirty = False; last_push = time.time()
     # ---- 13:25 收盤競價回補 ----
     po.process(0.1); po.sync_deals()
     holding = po.close_all(limit=True)
@@ -584,7 +598,13 @@ def cmd_run(a):
     pub.live(state("等待收盤", f"收盤競價回補 {len(holding)} 檔"), force=True)
     sleep_until(at(*END_T), step=lambda d: (po.process(d), po.reconcile()))
     po.sync_deals(); po.reconcile()
-    trades, legs = po.settle()
+    real_closes = {}
+    try:
+        ids = list(po.book.s); mk = dict(zip(watch.stock_id, watch.market_type))
+        fin = mis.snapshot(ids, [mk[s] for s in ids])
+        real_closes = {r.stock_id: r.z for r in fin.itertuples()}
+    except Exception as e: log(f"⚠ 抓 MIS 收盤價失敗 ({e}), 用最後一筆 tick 當收盤價")
+    trades, legs = po.settle(real_closes)
     summ = summarize(ds, info, trades, legs, len(watch), "simulation")
     write_day(ds, trades, legs, po.events, summ)
     log("結算:", json.dumps(OL._jclean(summ), ensure_ascii=False))

@@ -317,6 +317,8 @@ cron-job.org 08:50 → paper.yml: orb_live.py refresh (D1) → paper_orb.py run 
 - 安全: `Shioaji(simulation=True)` 寫死、常數 `SIMULATION=True`、從不 `activate_ca()`、登入後 `account_balance` 必須是模擬預設值 (同 v1 的三道查核), 任一不過就停止。委託帶 `custom_field="orbv2"`, 和 v1 `paper_trade.py` 共用同一個模擬帳戶也不會讀錯回報。workflow 濾掉 Shioaji 登入時印的 `Session Property` 行 (含身分證字號)。
 - 防裸空: 停損 / 收盤時先取消未成交的券賣單；若取消與成交賽跑、券賣之後才回報成交, `reconcile()` 會補買回差額。永豐合約顯示不可現沖券賣的股票照樣佔 Book 名額 (與訊號一致) 但不下單, 標「略過」。
 - 限制: 模擬環境的成交價是永豐依行情撮合的模擬值, 沒有真實委託簿衝擊；主要量到的是 偵測延遲 + 觸發後的價格移動。v1 2026-10-27 的模擬券賣成交時間是 09:03:17~19 (表定 09:01 送單, 原因未確認), 所以同時看 `trigger_slip_ticks` (只靠行情, 跟券商無關) 與 `slip_ticks`。
+- **收盤腳以真實收盤價結算 (2026-11-04 起)**: 永豐模擬環境的收盤競價回報價不可靠 (11-04 順達 283.5 vs 收盤 271.5、光寶科 235 vs 225、合晶 77.4 vs 83.5, 差 18~54 檔), 收盤集合競價本來就以收盤價成交, 所以 `buy_px` / `sim_net_pct` / `sim_pnl` 的收盤腳改用 13:35 MIS 收盤價 (抓不到時用最後一筆 tick)；模擬回報價另存 `broker_buy_px` (trades) 與 `broker_fill_px` (slippage)。進場與停損仍用模擬成交價。
+- **HF 上傳頻率**: HF 每個 repo 每小時最多 128 個 commit, live / paper / v1 共用 `daytrade` dataset, 11-04 09:38 paper 撞到 429。現在盤中 live.json 有事件時最快每 2 分鐘上傳一次 (被擋下的之後補傳)、沒事件每 3 分鐘, 階段變化仍立即上傳；`orb_live.py` 收盤後的當天檔案改成一個 commit (原本每檔一個)。
 ```bash
 python3 scripts/paper_orb.py run --dry --now                 # 不等時間、不下單: 算名單; 有 SINOPAC_* 時也登入模擬環境查合約 / 快照
 python3 scripts/paper_orb.py run --env-file <.env> --publish # 盤中正式跑 (08:50 後啟動, 跑到 13:35)

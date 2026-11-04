@@ -292,34 +292,46 @@ def fetch_eligible(date):
 # ============================== 發布到 HF (雲端網頁讀) ==============================
 class Publisher:
     """把盤中狀態寫到 signals/live.json, 並 (有 HF_TOKEN 時) 上傳到 HF db/orb/live.json。
-    有事件立即上傳; 否則至少間隔 min_gap 秒。token 只從環境變數讀, 不印出。"""
-    def __init__(self, enabled, min_gap=180):
+    force (階段變化) 一定上傳; event (新事件) 最快每 event_gap 秒, 被擋下的之後補傳; 否則每 min_gap 秒。
+    HF 每個 repo 每小時最多 128 個 commit (live / paper / v1 共用同一個 dataset), 所以事件不能每筆都 commit。
+    token 只從環境變數讀, 不印出。"""
+    def __init__(self, enabled, min_gap=180, event_gap=120):
         import os
-        self.enabled = enabled; self.min_gap = min_gap; self.last = 0.0; self.api = None
+        self.enabled = enabled; self.min_gap = min_gap; self.event_gap = event_gap; self.last = 0.0; self.api = None; self.pending = False
         if enabled:
             tok = os.environ.get("HF_TOKEN")
             if not tok: print("⚠ --publish 但沒有 HF_TOKEN, 只寫本機 signals/live.json"); self.enabled = False
             else:
                 from huggingface_hub import HfApi
                 self.api = HfApi(token=tok)
-    def push(self, state, force=False):
+    def push(self, state, force=False, event=False):
         state = {**state, "updated_at": now_tw().strftime("%Y-%m-%d %H:%M:%S")}
         SIG.mkdir(exist_ok=True); p = SIG / "live.json"
         p.write_text(json.dumps(_jclean(state), ensure_ascii=False, default=_jdefault, allow_nan=False), encoding="utf-8")
-        if not self.enabled or (not force and time.time() - self.last < self.min_gap): return
+        if not self.enabled: return
+        self.pending = self.pending or event
+        gap = time.time() - self.last
+        if not (force or gap >= self.min_gap or (self.pending and gap >= self.event_gap)): return
+        self.last = time.time(); self.pending = False      # 失敗也算一次, 避免 429 時每輪重試把額度用光
         for k in range(3):
             try:
                 self.api.upload_file(path_or_fileobj=str(p), path_in_repo=f"{HF_PREFIX}/live.json", repo_id=HF_REPO, repo_type="dataset",
                                      commit_message=f"orb live {state.get('date')} {state.get('phase')}")
-                self.last = time.time(); return
+                return
             except Exception as e:
                 print(f"HF 上傳失敗 ({k + 1}/3): {e}"); time.sleep(5)
     def upload_day(self, ds):
         if not self.enabled: return
-        files = [f for f in SIG.glob(f"{ds}_*") if f.is_file()]
-        for f in files:
-            try: self.api.upload_file(path_or_fileobj=str(f), path_in_repo=f"{HF_PREFIX}/live/{ds}/{f.name}", repo_id=HF_REPO, repo_type="dataset", commit_message=f"orb day {ds} {f.name}")
-            except Exception as e: print("HF 上傳失敗:", f.name, e)
+        from huggingface_hub import CommitOperationAdd
+        files = sorted(f for f in SIG.glob(f"{ds}_*") if f.is_file())
+        if not files: return
+        ops = [CommitOperationAdd(f"{HF_PREFIX}/live/{ds}/{f.name}", str(f)) for f in files]
+        for k in range(3):                                   # 一次 commit 全部檔案 (原本每檔一個 commit)
+            try:
+                self.api.create_commit(repo_id=HF_REPO, repo_type="dataset", operations=ops, commit_message=f"orb day {ds} ({len(ops)} files)")
+                print(f"已上傳 {HF_PREFIX}/live/{ds}/ ({len(ops)} 檔)"); return
+            except Exception as e:
+                print(f"HF 上傳失敗 ({k + 1}/3): {e}"); time.sleep(10)
 
 def _jclean(o):
     """遞迴把 NaN / inf 轉成 None、numpy 型別轉成 Python 型別 (標準 JSON 不接受 NaN)."""
@@ -523,7 +535,7 @@ def cmd_run(a):
             print(f"⏰ 13:24 提醒: 持有 {len(holding)} 檔 {holding}, 13:25 前掛市價買回參加收盤競價"); reminded = True
             if a.notify: notify("收盤回補提醒", f"{len(holding)} 檔: {' '.join(holding)}")
             pub.push(live_state(ds, "收盤回補提醒", info, book, mem, excl, note=f"13:25 前掛市價買回 {len(holding)} 檔"), force=True)
-        pub.push(live_state(ds, "監看中", info, book, mem, excl), force=bool(new_ev)); new_ev.clear()
+        pub.push(live_state(ds, "監看中", info, book, mem, excl), event=bool(new_ev)); new_ev.clear()
         if not book.active() or (not holding and t >= P["DEADLINE"] + 1): break
         time.sleep(max(a.poll - (time.time() - loop_start), 1))
     # ---- 收盤結算 ----
