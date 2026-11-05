@@ -25,7 +25,7 @@ import numpy as np, pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import ROOT, RAW, PROC, COST, HF_REPO, HF_PREFIX
-from line_notify import LineNotifier, px as line_px
+from line_notify import LineNotifier, load_env_file, px as line_px
 
 TZ = ZoneInfo("Asia/Taipei")
 LIVE = ROOT / "data" / "live"
@@ -473,6 +473,7 @@ def line_event(e):
     return f"{LINE_EV.get(e['event'], e['event'])}\n{e['time']} {e['stock_id']} {e['name']} @ {line_px(e['price'])}\n{e['note']}"
 
 def cmd_run(a):
+    for f in a.env_file: load_env_file(f)
     today = pd.Timestamp(now_tw().date()); ds = str(today.date())
     SIG.mkdir(exist_ok=True)
     line = LineNotifier(f"[ORB 實盤訊號 {ds}]")
@@ -619,6 +620,7 @@ def main():
     p.add_argument("--force", action="store_true", help="週一或大盤跳空 < -1%% 仍跑 (觀察用)")
     p.add_argument("--now", action="store_true", help="不等 09:02 / 09:05 (測試用)")
     p.add_argument("--publish", action="store_true", help="把盤中狀態上傳到 HF db/orb/live.json (需環境變數 HF_TOKEN)")
+    p.add_argument("--env-file", action="append", default=[], help="讀 .env (例如 LINE 推播的 token / user id)")
     p = sp.add_parser("replay"); p.add_argument("--date", required=True); p.add_argument("--eligibility", action="store_true")
     p = sp.add_parser("verify"); p.add_argument("--start", required=True); p.add_argument("--end", required=True)
     a = ap.parse_args()

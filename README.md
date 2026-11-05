@@ -337,4 +337,5 @@ LINE Notify 已於 2025-03-31 停止服務, 改用 **LINE Messaging API 的 push
 - **paper_orb.py run** (永豐模擬單, 前綴 `[ORB 模擬單 日期]`): 🔻/🛑 訊號 + 📤 送單 (時間、張數、市價 / 限價)、✅ 成交 (成交時間、價格、張數)、✗ 不下單 / 委託失敗 / 委託異常、⏰ 13:25 收盤競價回補、📊 模擬單結算。`--dry` 與 `replay` 不推。
 - 每則都含時間與價格。3 秒內的事件合併成一則 (`LINE_BATCH_SEC`), 因為 LINE 依則數計費、免費方案每月則數有上限; 額度用完 (429) 或 token 錯誤時當次停止推播, 只印警告。
 - **設定**: 環境變數 (或 `--env-file`) `LINE_CHANNEL_ACCESS_TOKEN` (Messaging API channel 的 long-lived channel access token)、`LINE_TO` (自己的 userId, U 開頭; 或群組 groupId)。GitHub Actions 用同名 repo Secrets; 想只留一支, 設 repo variable `LINE_NOTIFY_LIVE=0` 或 `LINE_NOTIFY_PAPER=0`。
+- 本機: `orb_live.py run` / `paper_orb.py run` 加 `--env-file <.env>` 即可讀 .env 裡的 LINE 設定 (也接受別名 `LINE_TOKEN` / `LINE_ACCESS_TOKEN` / `LINE_CHANNEL_TOKEN` 與 `LINE_USER_ID` / `LINE_USERID` / `LINE_UID` / `LINE_GROUP_ID`)。
 - 測試: `python3 scripts/line_notify.py "測試" --env-file <.env>`
