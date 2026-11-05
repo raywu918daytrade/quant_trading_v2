@@ -25,6 +25,7 @@ import numpy as np, pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import ROOT, RAW, PROC, COST, HF_REPO, HF_PREFIX
+from line_notify import LineNotifier, px as line_px
 
 TZ = ZoneInfo("Asia/Taipei")
 LIVE = ROOT / "data" / "live"
@@ -467,9 +468,14 @@ def notify(title, msg):
     try: subprocess.run(["osascript", "-e", f'display notification "{msg}" with title "{title}" sound name "Glass"'], timeout=5)
     except Exception: pass
 
+LINE_EV = {"SHORT": "🔻 進場訊號 (跌破)", "STOP": "🛑 停損訊號 (突破)", "CLOSE": "🔔 收盤回補", "FULL": "⚪ 跌破但額滿"}
+def line_event(e):
+    return f"{LINE_EV.get(e['event'], e['event'])}\n{e['time']} {e['stock_id']} {e['name']} @ {line_px(e['price'])}\n{e['note']}"
+
 def cmd_run(a):
     today = pd.Timestamp(now_tw().date()); ds = str(today.date())
     SIG.mkdir(exist_ok=True)
+    line = LineNotifier(f"[ORB 實盤訊號 {ds}]")
     pub = Publisher(a.publish)
     pool, last = cmd_pool(argparse.Namespace(date=None))
     pub.push(live_state(ds, "盤前", note=f"盤前池 {int(pool.in_pool.sum())} 檔 (D1 最後 {last.date()})"), force=True)
@@ -506,12 +512,15 @@ def cmd_run(a):
     if len(excl): print("剔除: " + ", ".join(f"{r.stock_id}{r.name}({r.excluded})" for r in excl.itertuples()))
     mem = {r.stock_id: dict(h=r.rh, l=r.rl, z=np.nan) for r in watch.itertuples()}
     pub.push(live_state(ds, "監看中", info, book, mem, excl), force=True)
+    line.send(f"09:05 監看 {len(watch)} 檔 (大盤跳空 {info['mkt_gap']*100:+.2f}%)" + "".join(
+        f"\n{r.stock_id} {r.name} 區間低 {line_px(r.rl)} / 高 {line_px(r.rh)} · {book.s[r.stock_id]['lots']} 張" for r in watch.itertuples()))
     evf = open(SIG / f"{ds}_events.csv", "a", encoding="utf-8")
     new_ev = []
     def log(e):
         print(f"🔔 {e['time']} {e['stock_id']} {e['name']} {e['event']} @ {e['price']:.2f}  {e['note']}")
         evf.write(",".join(str(e[k]) for k in ["time", "stock_id", "name", "event", "price", "ref", "note"]) + "\n"); evf.flush()
         new_ev.append(e)
+        if e["event"] in LINE_EV: line.send(line_event(e))
         if a.notify and e["event"] in ("SHORT", "STOP"): notify(f"{e['event']} {e['stock_id']} {e['name']}", f"{e['price']:.2f} {e['note']}")
     book.log = log
     mk = dict(zip(watch.stock_id, watch.market_type))
@@ -534,6 +543,7 @@ def cmd_run(a):
         if not reminded and t >= 264 and holding:           # 13:24
             print(f"⏰ 13:24 提醒: 持有 {len(holding)} 檔 {holding}, 13:25 前掛市價買回參加收盤競價"); reminded = True
             if a.notify: notify("收盤回補提醒", f"{len(holding)} 檔: {' '.join(holding)}")
+            line.send(f"⏰ {now_tw():%H:%M:%S} 收盤回補提醒: 13:25 前掛市價買回 {len(holding)} 檔\n" + " ".join(f"{s} {book.s[s]['name']}" for s in holding))
             pub.push(live_state(ds, "收盤回補提醒", info, book, mem, excl, note=f"13:25 前掛市價買回 {len(holding)} 檔"), force=True)
         pub.push(live_state(ds, "監看中", info, book, mem, excl), event=bool(new_ev)); new_ev.clear()
         if not book.active() or (not holding and t >= P["DEADLINE"] + 1): break
@@ -548,6 +558,12 @@ def cmd_run(a):
     evf.close()
     summarize(book.trades(), ds, SIG, info)
     pub.push(live_state(ds, "已結算", info, book, mem, excl), force=True); pub.upload_day(ds)
+    line.send(line_summary(book.trades(), ds)); line.flush()
+
+def line_summary(tr, ds):
+    if not len(tr): return f"📊 {ds} 結算: 今日無進場"
+    rows = "".join(f"\n{r.stock_id} {r.name} {line_px(r.entry_px)}→{line_px(r.exit_px)} {r.reason} {r.r_pct:+.2f}% ({r.pnl:+,.0f})" for r in tr.itertuples())
+    return f"📊 {ds} 結算 {len(tr)} 筆 · 勝率 {(tr.r_pct > 0).mean()*100:.0f}% · 合計 {tr.pnl.sum():+,.0f} 元" + rows
 
 def cmd_replay(a):
     date = pd.Timestamp(a.date)

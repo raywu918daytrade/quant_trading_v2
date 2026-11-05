@@ -330,3 +330,11 @@ python3 scripts/paper_orb.py replay --date 2026-10-22        # 離線: 歷史分
   2. 合併到 main 並推送後 (推 `.github/workflows/` 需要有 workflow scope 的帳號), 重跑 `python3 scripts/setup_cronjob.py --env-file <.env>` 新增 cron-job.org 「fade v2 paper 08:50」(其餘三個 job 只會被更新, 不重複建立)。
   3. 第一次建議手動: GitHub → Actions → Paper trade → Run workflow, 看 log 有「✓ 模擬環境確認」。
 - 同一組 API key 平日會同時有 v1 paper_trade (sr、base 兩台) 與 v2 paper 三個登入；永豐對同時連線數有上限, 若 log 出現登入被拒再調整。
+
+## LINE 交易通知 (2026-11-05) — `scripts/line_notify.py`
+LINE Notify 已於 2025-03-31 停止服務, 改用 **LINE Messaging API 的 push message** (官方帳號推給自己)。沒設定就不推, 不影響原本流程; 送出在背景執行緒, 不卡行情 / 下單。
+- **orb_live.py run** (實盤訊號, 前綴 `[ORB 實盤訊號 日期]`): 09:05 監看名單 (區間低 / 高、張數)、🔻 進場訊號 (跌破)、🛑 停損訊號 (突破)、⏰ 13:24 收盤回補提醒、🔔 收盤回補、📊 結算 (每筆進出價、報酬、合計損益)。
+- **paper_orb.py run** (永豐模擬單, 前綴 `[ORB 模擬單 日期]`): 🔻/🛑 訊號 + 📤 送單 (時間、張數、市價 / 限價)、✅ 成交 (成交時間、價格、張數)、✗ 不下單 / 委託失敗 / 委託異常、⏰ 13:25 收盤競價回補、📊 模擬單結算。`--dry` 與 `replay` 不推。
+- 每則都含時間與價格。3 秒內的事件合併成一則 (`LINE_BATCH_SEC`), 因為 LINE 依則數計費、免費方案每月則數有上限; 額度用完 (429) 或 token 錯誤時當次停止推播, 只印警告。
+- **設定**: 環境變數 (或 `--env-file`) `LINE_CHANNEL_ACCESS_TOKEN` (Messaging API channel 的 long-lived channel access token)、`LINE_TO` (自己的 userId, U 開頭; 或群組 groupId)。GitHub Actions 用同名 repo Secrets; 想只留一支, 設 repo variable `LINE_NOTIFY_LIVE=0` 或 `LINE_NOTIFY_PAPER=0`。
+- 測試: `python3 scripts/line_notify.py "測試" --env-file <.env>`

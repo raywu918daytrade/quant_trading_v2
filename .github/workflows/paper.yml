@@ -34,6 +34,10 @@ jobs:
           SINOPAC_API_KEY: ${{ secrets.SINOPAC_API_KEY }}
           SINOPAC_SECRET_KEY: ${{ secrets.SINOPAC_SECRET_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # LINE 推播 (Messaging API): 沒設 secrets 就不推; repo variable LINE_NOTIFY_PAPER=0 可單獨關掉這支
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_TO: ${{ secrets.LINE_TO }}
+          LINE_NOTIFY: ${{ vars.LINE_NOTIFY_PAPER }}
         run: |
           set -o pipefail   # Shioaji 登入時會印含身分證字號的 Session Property 行, 濾掉 (同 v1)
           F=""; [ -n "${{ github.event.inputs.force }}" ] && F="--force"
