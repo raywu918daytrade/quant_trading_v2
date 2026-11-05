@@ -8,6 +8,7 @@
   python3 scripts/orb_live.py pool [--date D]         # 只算盤前池
   python3 scripts/orb_live.py replay --date D         # 用歷史 M1 回放某一天 (與 run 同一套邏輯)
   python3 scripts/orb_live.py verify --start A --end B  # 回放多日, 與回測 (14_orb_dn_deepdive) 逐筆對帳
+  python3 scripts/orb_live.py line-test               # 推一則測試訊息到 LINE (確認 LINE_CHANNEL_ACCESS_TOKEN / LINE_USER_ID)
 
 規則:
   池 (只用前一日以前資料): 上市櫃 4 碼非 ETF、昨收 10~300、20 日均成交額 ≥3 億、ATR20 ≥3%。
@@ -333,6 +334,40 @@ class Publisher:
             except Exception as e:
                 print(f"HF 上傳失敗 ({k + 1}/3): {e}"); time.sleep(10)
 
+
+# ============================== LINE 推播 (Messaging API) ==============================
+class Line:
+    """把訊號推到自己的 LINE: 官方帳號 Messaging API 的 push (LINE Notify 已於 2025-03 停用)。
+    token / userId 只從環境變數 LINE_CHANNEL_ACCESS_TOKEN / LINE_USER_ID 讀, 不印出。免費額度每月 200 則, 所以同一次輪詢的事件合併成 1 則。"""
+    URL = "https://api.line.me/v2/bot/message/push"
+    def __init__(self, enabled):
+        import os
+        self.enabled = enabled; self.tok = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN"); self.to = os.environ.get("LINE_USER_ID")
+        if enabled and not (self.tok and self.to):
+            print("⚠ --line 但沒有 LINE_CHANNEL_ACCESS_TOKEN / LINE_USER_ID, 不推播"); self.enabled = False
+    def push(self, text):
+        if not self.enabled: return False
+        import requests, uuid
+        hdr = {"Authorization": f"Bearer {self.tok}", "X-Line-Retry-Key": str(uuid.uuid4())}   # 同一把 retry key 重送不會重複推 (已送達回 409)
+        for k in range(2):
+            try:
+                r = requests.post(self.URL, headers=hdr, json={"to": self.to, "messages": [{"type": "text", "text": text[:5000]}]}, timeout=5)
+                if r.status_code in (200, 409): return True
+                print(f"⚠ LINE 推播失敗 {r.status_code}: {r.text[:200]}")
+                if r.status_code < 500: return False                # 4xx (token 錯 / 額度用完 429) 重送也沒用
+            except Exception as e: print(f"⚠ LINE 推播失敗 ({k + 1}/2): {e}")
+        return False
+
+def line_events(evs):
+    return "\n".join(f"{'🔻' if e['event'] == 'SHORT' else '🛑'} {e['time'][:5]} {e['event']} {e['stock_id']} {e['name']} @ {e['price']:.2f}\n{e['note']}" for e in evs)
+
+def line_summary(tr, date, info):
+    lines = [f"📊 {date} 結算", f"大盤跳空 {info.get('mkt_gap', np.nan)*100:+.2f}%  監看 {info.get('n_watch', 0)}  進場 {len(tr)}"]
+    if len(tr):
+        lines += [f"{r.stock_id} {r.name} {r.r_pct:+.2f}% {'停損' if r.reason.startswith('停損') else '收盤'} {r.pnl:+,.0f}" for r in tr.itertuples()]
+        lines.append(f"平均每筆 {tr.r_pct.mean():+.2f}%  勝率 {(tr.r_pct > 0).mean()*100:.0f}%  合計 {tr.pnl.sum():+,.0f} 元")
+    return "\n".join(lines)
+
 def _jclean(o):
     """遞迴把 NaN / inf 轉成 None、numpy 型別轉成 Python 型別 (標準 JSON 不接受 NaN)."""
     if isinstance(o, dict): return {k: _jclean(v) for k, v in o.items()}
@@ -470,7 +505,7 @@ def notify(title, msg):
 def cmd_run(a):
     today = pd.Timestamp(now_tw().date()); ds = str(today.date())
     SIG.mkdir(exist_ok=True)
-    pub = Publisher(a.publish)
+    pub = Publisher(a.publish); line = Line(a.line)
     pool, last = cmd_pool(argparse.Namespace(date=None))
     pub.push(live_state(ds, "盤前", note=f"盤前池 {int(pool.in_pool.sum())} 檔 (D1 最後 {last.date()})"), force=True)
     if today.dayofweek in P["NO_DOW"] and not a.force:
@@ -528,12 +563,15 @@ def cmd_run(a):
             if np.isfinite(hi) or np.isfinite(lo):
                 book.step(t, r.stock_id, lo if np.isfinite(lo) else np.inf, hi if np.isfinite(hi) else -np.inf, last, last)
             m["h"] = np.nanmax([m["h"], r.h]); m["l"] = np.nanmin([m["l"], r.l]); m["z"] = last
-        for sid in ids:                                     # 12:00 後 WAIT 失效
+        sig = [e for e in new_ev if e["event"] in ("SHORT", "STOP")]
+        if sig: line.push(line_events(sig))                 # 先推 LINE 再上傳 HF (HF 重試可能卡十幾秒)
+        for sid in ids:                                    # 12:00 後 WAIT 失效
             if book.s[sid]["state"] == "WAIT" and t >= P["DEADLINE"] + 1: book.s[sid]["state"] = "EXPIRED"
         holding = [s for s, p in book.s.items() if p["state"] == "SHORT"]
         if not reminded and t >= 264 and holding:           # 13:24
             print(f"⏰ 13:24 提醒: 持有 {len(holding)} 檔 {holding}, 13:25 前掛市價買回參加收盤競價"); reminded = True
             if a.notify: notify("收盤回補提醒", f"{len(holding)} 檔: {' '.join(holding)}")
+            line.push(f"⏰ 收盤回補提醒: 持有 {len(holding)} 檔, 13:25 前掛市價買回\n" + "\n".join(f"{s} {book.s[s]['name']} {book.s[s]['lots']} 張" for s in holding))
             pub.push(live_state(ds, "收盤回補提醒", info, book, mem, excl, note=f"13:25 前掛市價買回 {len(holding)} 檔"), force=True)
         pub.push(live_state(ds, "監看中", info, book, mem, excl), event=bool(new_ev)); new_ev.clear()
         if not book.active() or (not holding and t >= P["DEADLINE"] + 1): break
@@ -547,7 +585,12 @@ def cmd_run(a):
         book.close_all({r.stock_id: (r.z if np.isfinite(r.z) else mem[r.stock_id]["z"]) for r in fin.itertuples()})
     evf.close()
     summarize(book.trades(), ds, SIG, info)
+    line.push(line_summary(book.trades(), ds, info))
     pub.push(live_state(ds, "已結算", info, book, mem, excl), force=True); pub.upload_day(ds)
+
+def cmd_line_test(a):
+    ok = Line(True).push(f"✅ orb_live LINE 測試 {now_tw():%Y-%m-%d %H:%M:%S}")
+    print("LINE 推播成功" if ok else "LINE 推播失敗"); sys.exit(0 if ok else 1)
 
 def cmd_replay(a):
     date = pd.Timestamp(a.date)
@@ -599,14 +642,16 @@ def main():
     p.add_argument("--capital", type=float, default=3_000_000, help="總資金, 每檔額度 = 資金/10")
     p.add_argument("--poll", type=float, default=10, help="輪詢秒數")
     p.add_argument("--notify", action="store_true", help="macOS 通知 (進場/停損/收盤提醒)")
+    p.add_argument("--line", action="store_true", help="LINE 推播 (進場/停損/收盤提醒/結算; 需環境變數 LINE_CHANNEL_ACCESS_TOKEN、LINE_USER_ID)")
     p.add_argument("--no-eligibility", action="store_true", help="不查現沖券賣資格")
     p.add_argument("--force", action="store_true", help="週一或大盤跳空 < -1%% 仍跑 (觀察用)")
     p.add_argument("--now", action="store_true", help="不等 09:02 / 09:05 (測試用)")
     p.add_argument("--publish", action="store_true", help="把盤中狀態上傳到 HF db/orb/live.json (需環境變數 HF_TOKEN)")
     p = sp.add_parser("replay"); p.add_argument("--date", required=True); p.add_argument("--eligibility", action="store_true")
     p = sp.add_parser("verify"); p.add_argument("--start", required=True); p.add_argument("--end", required=True)
+    sp.add_parser("line-test")
     a = ap.parse_args()
-    {"refresh": lambda a: refresh(a.months, a.m1_months), "pool": cmd_pool, "run": cmd_run, "replay": cmd_replay, "verify": cmd_verify}[a.cmd](a)
+    {"refresh": lambda a: refresh(a.months, a.m1_months), "pool": cmd_pool, "run": cmd_run, "replay": cmd_replay, "verify": cmd_verify, "line-test": cmd_line_test}[a.cmd](a)
 
 if __name__ == "__main__":
     main()

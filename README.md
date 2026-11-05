@@ -271,7 +271,7 @@ python3 scripts/webapp.py                 # 開 http://127.0.0.1:8790 (只綁本
 架構同 v1: GitHub Actions 執行、cron-job.org 準時觸發、Hugging Face dataset `raywu918daytrade/daytrade` 的 `db/orb/` 存資料、GitHub Pages 放網頁 (Mac 不用開)。
 ```
 cron-job.org (平日, 台灣時間)
-  08:50 → .github/workflows/live.yml     orb_live.py refresh (D1 3 個月) → orb_live.py run --publish
+  08:50 → .github/workflows/live.yml     orb_live.py refresh (D1 3 個月) → orb_live.py run --publish --line
                                           09:02 開盤 / 09:05 區間 / 每 10 秒輪詢到 13:31, 狀態寫 HF db/orb/live.json, 收盤後當天檔案寫 db/orb/live/<date>/
   21:00 → .github/workflows/nightly.yml  cloud_nightly.py: 下載 db/orb/history/*.parquet → refresh (D1 6 個月 + M1 2 個月) → build_history.py (增量)
   08:10 → nightly.yml (補跑)              → export_web.py (新日子 days/<date>.json + index.json) → 上傳 db/orb/history/ 與 db/orb/web/
@@ -281,6 +281,14 @@ cron-job.org (平日, 台灣時間)
 ```
 - 一次性設定: (1) GitHub repo Secrets 加 `HF_TOKEN` (HF 寫入權限)；(2) 本機 `python3 scripts/export_web.py --all` 後 `HF_TOKEN=... python3 scripts/cloud_nightly.py --seed` 上傳歷史與 1,654 天網頁檔 (約 225 MB)；(3) `python3 scripts/setup_cronjob.py --env-file <.env> --test` 建立 cron-job.org 三個排程 (需 `CRONJOB_API_KEY` 與 `GH_DISPATCH_TOKEN`: GitHub fine-grained token 只選 quant_trading_v2、Actions: Read and write)；(4) GoDaddy CNAME `fade` → `raywu918daytrade.github.io` (2026-10-27 已設定)。
 - 手動補跑: GitHub → Actions → Live signals / Nightly history update → Run workflow。
+
+### LINE 推播 (2026-11-05) — `orb_live.py run --line`
+live.yml 盤中把訊號推到自己的 LINE (LINE Notify 已於 2025-03 停用, 改用官方帳號的 Messaging API push)。
+- 推播內容: SHORT 進場 (代號、成交價、張數、停損價)、STOP 停損、13:24 收盤回補提醒 (持有檔數與張數)、13:31 結算 (逐檔報酬與損益、平均、勝率、合計)。不推 09:05 監看名單、FULL、「今日不交易」。
+- 額度: 免費方案每月 200 則 (push 給 1 人算 1 則)。同一次 10 秒輪詢內的多檔事件合併成 1 則；日均進場 5~6 檔、約一半停損 → 每天約 10 則、每月約 170 則。超過額度 LINE 回 429, 程式只印警告、不影響訊號與 HF 上傳。
+- 一次性設定: (1) [LINE Official Account Manager](https://manager.line.biz/) 建官方帳號 → 設定 → Messaging API → 啟用；(2) [LINE Developers Console](https://developers.line.biz/console/) 該 channel 的 Messaging API 分頁發 Channel access token (long-lived), Basic settings 分頁最下面抄 Your user ID (`U` 開頭 33 碼)；(3) 用自己的 LINE 加該官方帳號好友 (沒加好友 push 會失敗)；(4) GitHub repo Secrets 加 `LINE_CHANNEL_ACCESS_TOKEN`、`LINE_USER_ID`。沒設 secret 時 live.yml 照跑, 只印「不推播」。
+- 測試: `LINE_CHANNEL_ACCESS_TOKEN=... LINE_USER_ID=... python3 scripts/orb_live.py line-test` 推一則測試訊息 (成功 exit 0)。本機盤中也可 `run --line`。
+- 失敗處理: 逾時 5 秒、5xx 或逾時重送 1 次 (帶同一把 `X-Line-Retry-Key`, 不會重複推)；4xx 不重送。paper.yml (永豐模擬單) 不推, 避免同一訊號推兩次。
 
 ### 實盤紀錄 (2026-10-27) — `scripts/export_live.py` + 網頁「實盤紀錄」分頁
 每天把實盤訊號 (live.yml 收盤後上傳的 `db/orb/live/<date>/<date>_{trades,events,watch,excluded,cand}.csv`) 和同日回測 (`orb_history/trades.parquet`) 逐檔對齊。
