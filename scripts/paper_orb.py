@@ -36,6 +36,7 @@ import numpy as np, pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import orb_live as OL
 from config import ROOT, COST, HF_REPO, HF_PREFIX
+from line_notify import LineNotifier, px as lpx
 
 TZ = OL.TZ
 PAPER = ROOT / "paper"
@@ -207,7 +208,11 @@ class PaperOrb:
         self.deals = defaultdict(list)          # (sid, "Sell"/"Buy") -> [(px, qty, dt)]
         self.skipped = {}; self.events = []; self.dirty = False
         self._cur = None; self.clock = now     # replay 換成合成 tick 的時間
+        self.line = None                        # run 時設成 LineNotifier (送單 / 成交推播); replay 不推
         self.book.log = self._on_book_event
+
+    def notify(self, text):
+        if self.line is not None: self.line.send(text)
 
     # ---- 行情 ----
     def on_tick(self, *args):
@@ -246,6 +251,7 @@ class PaperOrb:
                 if op.get("op_code") not in ("00", None):
                     sid = str((msg.get("contract") or {}).get("code")); txt = f"op_code={op.get('op_code')} {op.get('op_msg')}"
                     log(f"委託異常 {sid} {o.get('action')} {txt}")
+                    self.notify(f"⚠ {now():%H:%M:%S} 委託異常 {sid} {self.w.get(sid, {}).get('name', '')} {o.get('action')}\n{txt}")
                     L = self.leg.get(sid, {}).get("entry" if "Sell" in str(o.get("action")) else "exit")
                     if L is not None: L["status"] = f"{L.get('status', '')} | {txt}".strip(" |")
         except Exception as e:
@@ -255,6 +261,10 @@ class PaperOrb:
         with self.lock:
             self.deals[(sid, act)].append((px, qty, dt)); self.dirty = True
         log(f"成交 {sid} {act} {qty} 張 @ {px}")
+        side = "券賣" if act == "Sell" else "買回"
+        auc = act == "Buy" and self.leg.get(sid, {}).get("exit", {}).get("leg") == "close"
+        self.notify(f"✅ 成交 {side} {(dt or now()).astimezone(TZ):%H:%M:%S}\n{sid} {self.w.get(sid, {}).get('name', '')} {qty} 張 @ {lpx(px)}"
+                    + (" (模擬回報; 結算以收盤價)" if auc else ""))
 
     def sync_deals(self):
         """callback 可能漏: 用 update_status 的 trade.status.deals 補齊 (以張數多者為準)."""
@@ -283,13 +293,17 @@ class PaperOrb:
             L = self.leg[sid]["entry"] = dict(signal_px=p["rl"], trigger_px=e["tick_px"], tick_time=e["tick_time"], recv_time=e["recv_time"])
             why = self.skipped.get(sid) or self.broker.can_short(sid)
             if why:
-                self.skipped[sid] = why; L["status"] = "skipped"; log(f"✗ {sid} 跌破但不下單: {why}"); return
+                self.skipped[sid] = why; L["status"] = "skipped"; log(f"✗ {sid} 跌破但不下單: {why}")
+                self.notify(f"✗ {hms(e['tick_time'])[:8]} {sid} {p['name']} 跌破 {lpx(p['rl'])} 但不下單: {why}"); return
             try:
                 tr, st = self.broker.sell_short(sid, p["lots"]); L["order_time"] = self.clock(); L["status"] = st
                 self.orders[(sid, "Sell")].append(tr)
                 log(f"券賣 {sid} {p['name']} {p['lots']} 張 市價 (觸發 {e['tick_px']} < 區間低 {p['rl']:g}, tick {hms(e['tick_time'])}, 收到 {hms(e['recv_time'])}) → {st}")
+                self.notify(f"🔻 進場訊號 {hms(e['tick_time'])[:8]} {sid} {p['name']}\n跌破區間低 {lpx(p['rl'])} (tick {lpx(e['tick_px'])}), 停損 {lpx(p['rh'])}\n"
+                            f"📤 送單 {L['order_time']:%H:%M:%S} 現沖券賣 {p['lots']} 張 市價 → {st}")
             except Exception as ex:
                 L["status"] = f"委託失敗: {ex}"; self.skipped[sid] = L["status"]; log("✗", sid, L["status"])
+                self.notify(f"✗ {sid} {p['name']} 券賣委託失敗: {ex}")
         elif e["event"] == "STOP":
             self.leg[sid]["exit"] = dict(leg="stop", signal_px=p["rh"], trigger_px=e["tick_px"], tick_time=e["tick_time"], recv_time=e["recv_time"])
             self.cover(sid)
@@ -318,8 +332,12 @@ class PaperOrb:
             L["ordered"] = L.get("ordered", 0) + q
             self.orders[(sid, "Buy")].append(tr)
             log(f"買回 {sid} {q} 張 {f'限價 {limit_px:g} (收盤競價)' if limit_px else '市價'} ({L['leg']}) → {st}")
+            head = (f"🛑 停損訊號 {hms(L.get('tick_time'))[:8]} {sid} {self.w[sid]['name']}\n突破區間高 {lpx(self.w[sid]['rh'])} (tick {lpx(L.get('trigger_px'))})\n"
+                    if L.get("leg") == "stop" and L.get("ordered") == q else f"{sid} {self.w[sid]['name']} ")
+            self.notify(head + f"📤 送單 {self.clock():%H:%M:%S} 買回 {q} 張 {f'限價 {lpx(limit_px)} (收盤競價)' if limit_px else '市價'} → {st}")
         except Exception as ex:
             L["status"] = f"委託失敗: {ex}"; log("✗ 買回委託失敗", sid, ex)
+            self.notify(f"✗ {sid} {self.w[sid]['name']} 買回委託失敗: {ex}")
 
     def reconcile(self):
         """券賣成交張數 > 已送出的買回張數 (取消券賣與成交賽跑時會發生) → 補送買回差額."""
@@ -510,6 +528,14 @@ class Pub:
                 log(f"已上傳 {HF_PAPER}/ ({ds}, {len(ops)} 檔)"); return
             except Exception as e: log(f"HF commit 失敗 ({k + 1}/3): {e}"); time.sleep(5)
 
+def paper_line_summary(ds, trades, summ):
+    t = trades[trades.sell_px.notna()] if len(trades) else trades
+    if not len(t): return f"📊 {ds} 模擬單結算: 今日無成交"
+    rows = "".join(f"\n{r.stock_id} {r.name} {lpx(r.sell_px)}→{lpx(r.buy_px)} {r.status}"
+                   + (f" {r.sim_net_pct:+.2f}% ({r.sim_pnl:+,.0f})" if np.isfinite(r.sim_pnl) else "") for r in t.itertuples())
+    pnl = summ.get("sim_pnl")
+    return f"📊 {ds} 模擬單結算 {len(t)} 筆" + (f" · 合計 {pnl:+,.0f} 元" if pnl is not None else "") + rows
+
 def no_trade_day(ds, info, pub, note):
     summ = summarize(ds, info, pd.DataFrame(), pd.DataFrame(), 0, f"simulation · {note}")
     write_day(ds, pd.DataFrame(columns=["date", "stock_id"]), pd.DataFrame(columns=["date", "stock_id", "leg"]), [], summ)
@@ -524,6 +550,7 @@ def cmd_run(a):
     if today.dayofweek >= 5 and not a.dry: sys.exit("週末不跑")
     if not has_keys() and not a.dry: sys.exit("缺少 SINOPAC_API_KEY / SINOPAC_SECRET_KEY")
     PAPER.mkdir(exist_ok=True); pub = Pub(a.publish and not a.dry)
+    line = LineNotifier(f"[ORB 模擬單 {ds}]", enabled=not a.dry)
     pool, last = OL.cmd_pool(argparse.Namespace(date=None))
     if today.dayofweek in OL.P["NO_DOW"] and not a.force:
         no_trade_day(ds, dict(trade_ok=False, reasons=["週一不交易"]), pub, "週一不交易"); return
@@ -564,7 +591,7 @@ def cmd_run(a):
     watch.to_csv(PAPER / f"{ds}_watch.csv", index=False, encoding="utf-8-sig")
     log(f"09:05 監看名單 {len(watch)} 檔 (每檔 {book.slot:,.0f} 元):\n" + (OL.fmt_watch(watch) if len(watch) else "(無)"))
     if len(excl): log("剔除: " + ", ".join(f"{r.stock_id}{r.name}({r.excluded})" for r in excl.itertuples()))
-    po = PaperOrb(book, watch, broker, ds)
+    po = PaperOrb(book, watch, broker, ds); po.line = line
     if broker is not None:
         for sid in watch.stock_id:
             why = broker.can_short(sid)
@@ -595,6 +622,7 @@ def cmd_run(a):
     po.process(0.1); po.sync_deals()
     holding = po.close_all(limit=True)
     log(f"13:25 收盤競價回補 {len(holding)} 檔 (漲停價限價): {holding}")
+    if holding: line.send(f"⏰ {now():%H:%M:%S} 收盤競價回補 {len(holding)} 檔 (漲停價限價): {' '.join(holding)}")
     pub.live(state("等待收盤", f"收盤競價回補 {len(holding)} 檔"), force=True)
     sleep_until(at(*END_T), step=lambda d: (po.process(d), po.reconcile()))
     po.sync_deals(); po.reconcile()
@@ -610,6 +638,7 @@ def cmd_run(a):
     log("結算:", json.dumps(OL._jclean(summ), ensure_ascii=False))
     if len(trades): print(trades[["stock_id", "name", "status", "rl", "sell_px", "entry_slip_ticks", "rh", "buy_px", "exit_leg", "exit_slip_ticks", "sim_net_pct", "ideal_net_pct"]].to_string(index=False))
     pub.live(state("已結算"), force=True); pub.day(ds, summ, legs)
+    line.send(paper_line_summary(ds, trades, summ)); line.flush()
     try: api.logout()
     except Exception: pass
 

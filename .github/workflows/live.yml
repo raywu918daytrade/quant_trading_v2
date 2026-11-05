@@ -31,6 +31,10 @@ jobs:
       - name: Run live (publish to HF)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # LINE 推播 (Messaging API): 沒設 secrets 就不推; repo variable LINE_NOTIFY_LIVE=0 可單獨關掉這支
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_TO: ${{ secrets.LINE_TO }}
+          LINE_NOTIFY: ${{ vars.LINE_NOTIFY_LIVE }}
         run: |
           F=""; [ -n "${{ github.event.inputs.force }}" ] && F="--force"
           python3 -W ignore scripts/orb_live.py run --publish $F
