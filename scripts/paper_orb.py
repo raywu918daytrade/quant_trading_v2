@@ -601,8 +601,7 @@ def cmd_run(a):
     real_closes = {}
     try:
         ids = list(po.book.s); mk = dict(zip(watch.stock_id, watch.market_type))
-        fin = mis.snapshot(ids, [mk[s] for s in ids])
-        real_closes = {r.stock_id: r.z for r in fin.itertuples()}
+        real_closes = mis.closes(ids, [mk[s] for s in ids])
     except Exception as e: log(f"⚠ 抓 MIS 收盤價失敗 ({e}), 用最後一筆 tick 當收盤價")
     trades, legs = po.settle(real_closes)
     summ = summarize(ds, info, trades, legs, len(watch), "simulation")
