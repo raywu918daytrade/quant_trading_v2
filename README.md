@@ -3,6 +3,10 @@
 目標: 用 D1 (日 K 型態、量能) 先選股票日, 再用 M1 (開盤區間、急拉/急殺、突破、VWAP 相對位置) 決定進場, 13:30 收盤出場, 系統性找出
 扣除成本 **且處理漲停鎖死** 後仍穩定獲利的「D1 型態 × M1 觸發 × 多/空」組合。
 
+## 開發流程 (2026-11-06 使用者指定)
+這是個人專案: **修改直接 commit 並 push 到 `main`, 不開 PR、不走 review**。`main` 一更新, GitHub Pages 網頁就會自動重新部署, 下一次 live / paper / nightly 排程也會直接用新版。
+推之前至少跑 `python3 -m py_compile scripts/*.py`；盤中 (08:50~13:35) 推上去不影響已在跑的 job, 從下一次排程才生效。
+
 資料: `data/d1`, `data/m1` 是 macOS 替身 → 實際在 `../quant_trading/data/raw/` (D1 2018-01~2026-10, M1 2020-01~2026-10, 月 parquet)。
 `scripts/config.py` 直接指向實際路徑。
 
