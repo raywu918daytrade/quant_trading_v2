@@ -129,7 +129,22 @@ def build_pool(d1, date):
 
 # ============================== 開盤 / 區間 ==============================
 def open_stage(pool, opens, date):
-    x = pool.merge(opens[["stock_id", "open"]], on="stock_id", how="left")
+    """opens: stock_id, open (+ y = 交易所公布的昨收, 盤中 MIS 才有)。
+    盤中以 MIS 的 y 為昨收: 2026-11-06 D1 昨收與 MIS 開盤對不上, 大盤平均跳空算成 -9.00% (上漲家數 0%) 而整天不交易。
+    D1 昨收與 y 差 >1% 的檔數會印出 (並記在 info["pc_mismatch"]), 方便查是哪一邊的資料錯。"""
+    cols = ["stock_id", "open"] + (["y"] if "y" in opens.columns else [])
+    x = pool.merge(opens[cols], on="stock_id", how="left")
+    mism = 0
+    if "y" in x.columns:
+        ok = x.y.notna() & (x.y > 0)
+        bad = ok & ((x.pc / x.y - 1).abs() > 0.01)
+        mism = int(bad.sum())
+        if mism:
+            ex = x[bad].head(5)
+            print(f"⚠ D1 昨收與 MIS 昨收 (y) 差 >1%: {mism}/{int(ok.sum())} 檔, 改用 MIS 昨收。例: " +
+                  ", ".join(f"{r.stock_id} D1 {r.pc:g} / MIS {r.y:g}" for r in ex.itertuples()))
+        x.loc[ok, "pc"] = x.loc[ok, "y"]
+        x["limit_up"] = x.pc.map(limit_up); x["force_px"] = x.pc * (1 + P["FORCE"])
     x["gap"] = x.open / x.pc - 1
     mkt_gap = x.gap.mean()
     breadth = (x.gap > 0).mean()
@@ -138,7 +153,9 @@ def open_stage(pool, opens, date):
     reasons = []
     if dow in P["NO_DOW"]: reasons.append("週一不交易")
     if not (mkt_gap >= P["MKT_GAP_MIN"]): reasons.append(f"大盤平均跳空 {mkt_gap*100:.2f}% < {P['MKT_GAP_MIN']*100:.0f}%")
-    return cand.sort_values("gap", ascending=False).reset_index(drop=True), dict(mkt_gap=mkt_gap, breadth=breadth, n_open=int(x.open.notna().sum()), n_liq=len(x), trade_ok=not reasons, reasons=reasons)
+    if np.isfinite(mkt_gap) and mkt_gap < -0.07:
+        print(f"⚠ 大盤平均跳空 {mkt_gap*100:.2f}% 極不合理 (上漲家數 {breadth*100:.0f}%), 請檢查 D1 昨收 / MIS 開盤價")
+    return cand.sort_values("gap", ascending=False).reset_index(drop=True), dict(mkt_gap=mkt_gap, breadth=breadth, n_open=int(x.open.notna().sum()), n_liq=len(x), trade_ok=not reasons, reasons=reasons, pc_mismatch=mism)
 
 def range_from_bars(bars):
     """09:00~09:04 的 1 分 K → 區間高 / 低、量 (張)、K 棒數、是否全是一字線 (開=高=低=收).
