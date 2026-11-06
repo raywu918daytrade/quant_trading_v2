@@ -130,8 +130,8 @@ def build_pool(d1, date):
 # ============================== 開盤 / 區間 ==============================
 def open_stage(pool, opens, date):
     """opens: stock_id, open (+ y = 交易所公布的昨收, 盤中 MIS 才有)。
-    盤中以 MIS 的 y 為昨收: 2026-11-06 D1 昨收與 MIS 開盤對不上, 大盤平均跳空算成 -9.00% (上漲家數 0%) 而整天不交易。
-    D1 昨收與 y 差 >1% 的檔數會印出 (並記在 info["pc_mismatch"]), 方便查是哪一邊的資料錯。"""
+    盤中以 MIS 的 y (交易所公布的昨收) 為昨收; D1 昨收與 y 差 >1% 的檔數會印出 (info["pc_mismatch"]), 方便查資料錯誤。
+    (2026-11-06 大盤平均跳空 -9.00% 經查是真的全面大跌開盤, D1 與 y 一致。)"""
     cols = ["stock_id", "open"] + (["y"] if "y" in opens.columns else [])
     x = pool.merge(opens[cols], on="stock_id", how="left")
     mism = 0
@@ -154,7 +154,7 @@ def open_stage(pool, opens, date):
     if dow in P["NO_DOW"]: reasons.append("週一不交易")
     if not (mkt_gap >= P["MKT_GAP_MIN"]): reasons.append(f"大盤平均跳空 {mkt_gap*100:.2f}% < {P['MKT_GAP_MIN']*100:.0f}%")
     if np.isfinite(mkt_gap) and mkt_gap < -0.07:
-        print(f"⚠ 大盤平均跳空 {mkt_gap*100:.2f}% 極不合理 (上漲家數 {breadth*100:.0f}%), 請檢查 D1 昨收 / MIS 開盤價")
+        print(f"⚠ 大盤平均跳空 {mkt_gap*100:.2f}% 異常大 (上漲家數 {breadth*100:.0f}%), 若非真實行情請檢查 D1 昨收 / MIS 開盤價")
     return cand.sort_values("gap", ascending=False).reset_index(drop=True), dict(mkt_gap=mkt_gap, breadth=breadth, n_open=int(x.open.notna().sum()), n_liq=len(x), trade_ok=not reasons, reasons=reasons, pc_mismatch=mism)
 
 def range_from_bars(bars):
