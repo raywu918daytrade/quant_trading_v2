@@ -100,10 +100,10 @@
   <div class="chips" id="stats"></div>
 </header>
 <section class="livewrap" id="livewrap">
-  <div class="livehead"><h2>今日即時</h2><span id="livephase" class="phase"></span><span id="liveinfo" class="sub"></span><span id="liveupd" class="sub" style="margin-left:auto"></span></div>
+  <div class="livehead"><h2>今日即時訊號 <span class="sub">(只產生訊號、不下單)</span></h2><span id="livephase" class="phase"></span><span id="liveinfo" class="sub"></span><span id="liveupd" class="sub" style="margin-left:auto"></span></div>
   <div id="livebody" class="sub">載入中…</div>
 </section>
-<nav class="tabs"><button data-tab="bt" class="on">歷史回測</button><button data-tab="rec">實盤紀錄</button><button data-tab="paper">模擬單</button></nav>
+<nav class="tabs"><button data-tab="bt" class="on">歷史回測</button><button data-tab="rec">即時訊號 (不下單)</button><button data-tab="paper">永豐模擬單</button></nav>
 <div id="tab-bt">
 <div class="eqwrap">
   <div class="eqhead"><span>資金曲線 (固定 300 萬、每檔額度 30 萬、整數張、不複利)　點曲線跳到該日</span><span id="eqval"></span></div>
@@ -142,22 +142,23 @@
 </div>
 </div>
 <div id="tab-rec" hidden>
+  <div class="hint" style="margin: 0 20px 8px">這一頁<b>不下單</b>：程式每 10 秒看一次證交所行情，跌破區間低就記一筆訊號，和同日回測對照。真正送出委託 (永豐模擬環境) 的結果在「永豐模擬單」分頁。</div>
   <div class="chips recstats" id="recstats"></div>
   <div id="recempty" class="empty" style="margin: 0 20px" hidden></div>
   <div id="recmain">
     <div class="eqwrap">
-      <div class="eqhead"><span>累計損益：實盤 vs 同日回測 (只算有實盤檔的日子；回測還沒更新的日子回測線不前進)　點曲線跳到該日</span>
-        <span class="eqkey"><span><i style="border-color:var(--blue)"></i>實盤</span><span><i style="border-color:var(--orange)"></i>回測</span><span id="receqval"></span></span></div>
+      <div class="eqhead"><span>累計損益：訊號 vs 同日回測 (只算有訊號檔的日子；回測還沒更新的日子回測線不前進)　點曲線跳到該日</span>
+        <span class="eqkey"><span><i style="border-color:var(--blue)"></i>訊號</span><span><i style="border-color:var(--orange)"></i>回測</span><span id="receqval"></span></span></div>
       <div id="receq"></div>
     </div>
     <div class="reclayout">
       <div class="card"><h3>每日 (新到舊)</h3><div class="tw" id="recdays"></div>
-        <div class="hint">實盤放空價 = 偵測到跌破時的最新成交價 (每 10 秒輪詢)；回測 = 區間低 (1 分 K)。兩者差距就是延遲與滑價。</div></div>
+        <div class="hint">訊號放空價 = 偵測到跌破時的最新成交價 (每 10 秒輪詢)；回測 = 區間低 (1 分 K)。兩者差距就是延遲與滑價。</div></div>
       <div class="card"><div class="dayhead"><h2 id="rectitle">逐檔對照</h2><div class="chips" id="recchips"></div></div>
         <div class="tw" id="recrows"></div>
-        <div class="hint">差 (檔) 用台股升降單位計，正 = 實盤較不利 (進場: 實盤放空價較低；出場: 實盤回補價較高)。點代號看該股回測 K 線。</div>
-        <details id="recevw"><summary id="recevs">實盤事件紀錄</summary><div id="recev" class="sub"></div></details>
-        <details id="recexw"><summary id="recexs">實盤 09:05 剔除</summary><div id="recex" class="sub"></div></details>
+        <div class="hint">差 (檔) 用台股升降單位計，正 = 訊號較不利 (進場: 訊號放空價較低；出場: 訊號回補價較高)。點代號看該股回測 K 線。</div>
+        <details id="recevw"><summary id="recevs">訊號事件紀錄</summary><div id="recev" class="sub"></div></details>
+        <details id="recexw"><summary id="recexs">訊號 09:05 剔除</summary><div id="recex" class="sub"></div></details>
       </div>
     </div>
   </div>
@@ -166,10 +167,10 @@
   <div class="chips recstats" id="ppstats"></div>
   <div class="reclayout">
     <div class="card">
-      <div class="livehead"><h2>今日模擬單</h2><span id="ppphase" class="phase"></span><span id="ppupd" class="sub" style="margin-left:auto"></span></div>
+      <div class="livehead"><h2>今日永豐模擬單</h2><span id="ppphase" class="phase"></span><span id="ppupd" class="sub" style="margin-left:auto"></span></div>
       <div id="ppinfo" class="sub" style="margin-bottom:6px"></div>
       <div class="tw" id="pplive">載入中…</div>
-      <div class="hint">永豐「模擬環境」委託，不是真實下單。訊號價 = 區間低 (進場) / 區間高 (停損) / 收盤價 (收盤回補)；差 (檔) 正 = 成交比訊號不利。盤中有成交時立即上傳，否則約每 3 分鐘，本頁每 20 秒重新讀取。</div>
+      <div class="hint">永豐「模擬環境」委託，不是真實下單。訊號價 = 區間低 (進場) / 區間高 (停損) / 收盤價 (收盤回補)；差 (檔) 正 = 成交比訊號不利。盤中有成交時最快每 2 分鐘上傳，否則約每 3 分鐘，本頁每 20 秒重新讀取。</div>
     </div>
   </div>
   <div id="ppempty" class="empty" style="margin: 0 20px" hidden></div>
@@ -450,7 +451,7 @@ window.addEventListener("hashchange", () => {
   else if (hs && hs !== cur.sid) loadStock(hs);
 });
 
-// ---------- 實盤紀錄 ----------
+// ---------- 訊號紀錄 ----------
 let TAB = "bt";
 const REC = { idx: null, date: null, by: {} };
 document.querySelectorAll(".tabs button").forEach((b) => b.onclick = () => showTab(b.dataset.tab));
@@ -476,26 +477,26 @@ async function loadRecIndex() {
   $("recmain").hidden = !days.length; $("recempty").hidden = !!days.length;
   if (!days.length) {
     $("recstats").innerHTML = "";
-    $("recempty").innerHTML = "還沒有實盤紀錄。<br>雲端盤中程式 (live.yml) 每個交易日收盤後把當天實盤檔上傳到 HF，晚上 cloud_nightly 與同日回測對齊後就會出現在這裡。" +
+    $("recempty").innerHTML = "還沒有訊號紀錄。<br>雲端盤中程式 (live.yml) 每個交易日收盤後把當天訊號檔上傳到 HF，晚上 cloud_nightly 與同日回測對齊後就會出現在這裡。" +
       (LOCAL ? "<br>本機模式讀 signals/ (orb_live.py run 的輸出；webapp.py --live-dir 可指定其他資料夾)。" : "");
     return;
   }
   const s = REC.idx.stats;
-  $("recstats").innerHTML = [["期間", `${s.first} ~ ${s.last}`], ["實盤天數", `${s.n_days} (有交易 ${s.n_live_days})`], ["實盤筆數", s.n_live], ["回測筆數", s.n_bt], ["兩邊都有", s.n_both],
-    ["實盤每筆", rpc(s.live_avg)], ["回測每筆", rpc(s.bt_avg)], ["實盤累計", wanStr(s.live_pnl)],
-    [`同期 (${s.n_ready} 天) 實盤 vs 回測`, `${wanStr(s.live_pnl_ready)} vs ${wanStr(s.bt_pnl)}，差 ${wanStr(s.diff_pnl)}`], ["平均進場差", s.entry_ticks_avg === null ? "–" : tk(s.entry_ticks_avg) + " 檔"]]
+  $("recstats").innerHTML = [["期間", `${s.first} ~ ${s.last}`], ["訊號天數", `${s.n_days} (有交易 ${s.n_live_days})`], ["訊號筆數", s.n_live], ["回測筆數", s.n_bt], ["兩邊都有", s.n_both],
+    ["訊號每筆", rpc(s.live_avg)], ["回測每筆", rpc(s.bt_avg)], ["訊號累計", wanStr(s.live_pnl)],
+    [`同期 (${s.n_ready} 天) 訊號 vs 回測`, `${wanStr(s.live_pnl_ready)} vs ${wanStr(s.bt_pnl)}，差 ${wanStr(s.diff_pnl)}`], ["平均進場差", s.entry_ticks_avg === null ? "–" : tk(s.entry_ticks_avg) + " 檔"]]
     .map(([k, v]) => `<span class="chip">${k} <b>${v}</b></span>`).join("");
   recL.setData(days.map((d) => ({ time: d.date, value: d.cum_live / 1e4 })));
   recB.setData(days.filter((d) => d.cum_bt !== null).map((d) => ({ time: d.date, value: d.cum_bt / 1e4 })));
   recEq.timeScale().fitContent();
-  $("recdays").innerHTML = `<table class="dl"><thead><tr><th>日期</th><th>實盤 / 回測筆</th><th>實盤每筆</th><th>回測每筆</th><th>實盤損益</th><th>回測損益</th><th>差</th><th>進場差 (檔)</th><th>備註</th></tr></thead><tbody>` +
+  $("recdays").innerHTML = `<table class="dl"><thead><tr><th>日期</th><th>訊號 / 回測筆</th><th>訊號每筆</th><th>回測每筆</th><th>訊號損益</th><th>回測損益</th><th>差</th><th>進場差 (檔)</th><th>備註</th></tr></thead><tbody>` +
     [...days].reverse().map((d) => `<tr data-d="${d.date}"><td>${d.date.slice(5)} (${wd(d.date)})</td><td>${d.n_live} / ${d.bt_ready ? d.n_bt : "–"}</td><td>${rpc(d.live_avg)}</td><td>${rpc(d.bt_avg)}</td>
       <td>${yuan(d.live_pnl)}</td><td>${yuan(d.bt_pnl)}</td><td>${yuan(d.diff_pnl)}</td><td>${tk(d.entry_ticks_avg)}</td><td>${d.note || ""}</td></tr>`).join("") + `</tbody></table>`;
   $("recdays").querySelectorAll("tbody tr").forEach((el) => el.onclick = () => loadRecDay(el.dataset.d));
 }
 recEq.subscribeClick((p) => { const t = timeStr(p.time); if (t && REC.by[t]) loadRecDay(t); });
 recEq.subscribeCrosshairMove((p) => { const t = timeStr(p.time); const d = t && REC.by[t];
-  $("receqval").innerHTML = d ? `${t}　實盤 ${wanStr(d.cum_live)}　回測 ${d.cum_bt === null ? "–" : wanStr(d.cum_bt)}` : ""; });
+  $("receqval").innerHTML = d ? `${t}　訊號 ${wanStr(d.cum_live)}　回測 ${d.cum_bt === null ? "–" : wanStr(d.cum_bt)}` : ""; });
 
 async function loadRecDay(date) {
   REC.date = date; history.replaceState(null, "", `#rec/${date}`);
@@ -505,9 +506,9 @@ async function loadRecDay(date) {
   try { j = await DS.recDay(date); } catch (e) { j = { error: `${date} 沒有逐檔資料` }; }
   if (j.error) { $("recchips").innerHTML = ""; $("recrows").innerHTML = `<div class="empty">${j.error}</div>`; $("recev").innerHTML = $("recex").innerHTML = ""; return; }
   const s = j.summary;
-  const ch = [["實盤", `${s.n_live} 筆 ${pct(s.live_avg)} ${wanStr(s.live_pnl)}`], ["回測", s.bt_ready ? `${s.n_bt} 筆 ${pct(s.bt_avg)} ${wanStr(s.bt_pnl)}` : "尚未更新"]];
+  const ch = [["訊號", `${s.n_live} 筆 ${pct(s.live_avg)} ${wanStr(s.live_pnl)}`], ["回測", s.bt_ready ? `${s.n_bt} 筆 ${pct(s.bt_avg)} ${wanStr(s.bt_pnl)}` : "尚未更新"]];
   if (s.diff_pnl !== null) ch.push(["差", wanStr(s.diff_pnl)]);
-  if (s.n_both) ch.push(["同股 " + s.n_both + " 筆每筆", `實盤 ${pct(s.both_live_avg)} / 回測 ${pct(s.both_bt_avg)}`], ["平均進場差", tk(s.entry_ticks_avg) + " 檔"]);
+  if (s.n_both) ch.push(["同股 " + s.n_both + " 筆每筆", `訊號 ${pct(s.both_live_avg)} / 回測 ${pct(s.both_bt_avg)}`], ["平均進場差", tk(s.entry_ticks_avg) + " 檔"]);
   if (s.note) ch.push(["備註", s.note]);
   $("recchips").innerHTML = ch.map(([k, v]) => `<span class="chip">${k} <b>${v}</b></span>`).join("");
   const hasBt = !!BYDATE[date];
@@ -515,15 +516,15 @@ async function loadRecDay(date) {
   const en = (x) => x ? `${fmt(x.entry_px)} <span class="sub">${x.entry_time || ""}</span>` : "–";
   $("recrows").innerHTML = j.rows.length ? `<table class="cmp"><thead>
     <tr><th></th><th></th><th class="grp sep" colspan="3">進場</th><th class="grp sep" colspan="3">出場</th><th class="grp sep" colspan="3">報酬 (含成本)</th><th></th></tr>
-    <tr><th>代號</th><th>名稱</th><th class="sep">實盤放空</th><th>回測進場</th><th>差 (檔)</th><th class="sep">實盤</th><th>回測</th><th>差 (檔)</th><th class="sep">實盤</th><th>回測</th><th>差</th><th>說明</th></tr></thead><tbody>` +
+    <tr><th>代號</th><th>名稱</th><th class="sep">訊號放空</th><th>回測進場</th><th>差 (檔)</th><th class="sep">訊號</th><th>回測</th><th>差 (檔)</th><th class="sep">訊號</th><th>回測</th><th>差</th><th>說明</th></tr></thead><tbody>` +
     j.rows.map((r) => `<tr class="${r.side === "both" ? "" : "only-" + r.side}"><td>${hasBt ? `<a class="sid" href="#${date}/${r.stock_id}" title="看回測 K 線">${r.stock_id}</a>` : r.stock_id}</td><td>${r.name}</td>
       <td class="sep">${en(r.live)}</td><td>${en(r.bt)}</td><td>${tk(r.entry_ticks)}</td>
       <td class="sep">${ex(r.live)}</td><td>${ex(r.bt)}</td><td>${tk(r.exit_ticks)}</td>
       <td class="sep">${r.live ? rpc(r.live.r_pct) : "–"}</td><td>${r.bt ? rpc(r.bt.r_pct) : "–"}</td><td>${r.r_diff === null ? "–" : rpc(r.r_diff)}</td><td>${r.note || ""}</td></tr>`).join("") + `</tbody></table>`
     : `<div class="empty">${s.note || "這天兩邊都沒有交易。"}</div>`;
-  $("recevs").textContent = `實盤事件紀錄 (${j.events.length})`;
+  $("recevs").textContent = `訊號事件紀錄 (${j.events.length})`;
   $("recev").innerHTML = j.events.map((e) => `${e.time} ${e.stock_id} ${e.name} ${e.event} @ ${fmt(e.price)}　${e.note}`).join("<br>") || "無";
-  $("recexs").textContent = `實盤 09:05 剔除 (${j.excluded.length})`;
+  $("recexs").textContent = `訊號 09:05 剔除 (${j.excluded.length})`;
   $("recex").innerHTML = j.excluded.map((e) => `${e.stock_id} ${e.name}: ${e.reason}`).join("<br>") || "無";
 }
 // ---------- 模擬單 (永豐模擬環境) ----------
