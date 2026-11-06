@@ -266,6 +266,25 @@ class MIS:
         df = pd.DataFrame(out, columns=["stock_id", "o", "h", "l", "z", "y", "u", "w", "v", "mis_t", "mis_d"])
         return df[df.stock_id.notna() & (df.stock_id != "")].reset_index(drop=True)
 
+    def closes(self, sids, markets, deadline=(13, 36, 0), retry=20):
+        """收盤價: 只接受 MIS 成交時間 ≥ 13:30:00 的 z (收盤集合競價結果)。
+        2026-11-05 13:31:01 抓到的仍是 13:25 前的最後成交 (驊宏資 42.15 / 萬海 112.5, 實際收盤 43.4 / 113.0), 所以沒更新的檔會重抓到 deadline,
+        到時仍沒有的用最後一次的 z 並列出。回傳 {stock_id: 收盤價}。"""
+        mk = dict(zip(sids, markets)); got, last = {}, {}
+        end = now_tw().replace(hour=deadline[0], minute=deadline[1], second=deadline[2], microsecond=0)
+        while True:
+            todo = [s for s in sids if s not in got]
+            if todo:
+                df = self.snapshot(todo, [mk[s] for s in todo])
+                for r in df.itertuples():
+                    if np.isfinite(r.z): last[r.stock_id] = r.z
+                    if np.isfinite(r.z) and str(r.mis_t or "") >= "13:30:00": got[r.stock_id] = r.z
+            todo = [s for s in sids if s not in got]
+            if not todo or now_tw() >= end: break
+            print(f"收盤價尚未更新 ({len(todo)} 檔: {' '.join(todo)}), {retry} 秒後重抓")
+            time.sleep(retry)
+        if todo: print(f"⚠ {deadline[0]}:{deadline[1]:02d} 仍無收盤競價成交時間: {' '.join(todo)}, 改用最後一筆 z")
+        return {**{s: last[s] for s in todo if s in last}, **got}
 
 # ============================== 當沖資格 ==============================
 def fetch_eligible(date):
@@ -581,8 +600,8 @@ def cmd_run(a):
     if holding:
         pub.push(live_state(ds, "等待收盤", info, book, mem, excl), force=True)
         wait_until(13, 31, 0)
-        fin = mis.snapshot(holding, [mk[s] for s in holding])
-        book.close_all({r.stock_id: (r.z if np.isfinite(r.z) else mem[r.stock_id]["z"]) for r in fin.itertuples()})
+        fin = mis.closes(holding, [mk[s] for s in holding])
+        book.close_all({s: fin.get(s, mem[s]["z"]) for s in holding})
     evf.close()
     summarize(book.trades(), ds, SIG, info)
     line.push(line_summary(book.trades(), ds, info))

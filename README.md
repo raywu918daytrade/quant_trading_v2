@@ -327,6 +327,7 @@ cron-job.org 08:50 → paper.yml: orb_live.py refresh (D1) → paper_orb.py run 
 - 限制: 模擬環境的成交價是永豐依行情撮合的模擬值, 沒有真實委託簿衝擊；主要量到的是 偵測延遲 + 觸發後的價格移動。v1 2026-10-27 的模擬券賣成交時間是 09:03:17~19 (表定 09:01 送單, 原因未確認), 所以同時看 `trigger_slip_ticks` (只靠行情, 跟券商無關) 與 `slip_ticks`。
 - **收盤腳以真實收盤價結算 (2026-11-04 起)**: 永豐模擬環境的收盤競價回報價不可靠 (11-04 順達 283.5 vs 收盤 271.5、光寶科 235 vs 225、合晶 77.4 vs 83.5, 差 18~54 檔), 收盤集合競價本來就以收盤價成交, 所以 `buy_px` / `sim_net_pct` / `sim_pnl` 的收盤腳改用 13:35 MIS 收盤價 (抓不到時用最後一筆 tick)；模擬回報價另存 `broker_buy_px` (trades) 與 `broker_fill_px` (slippage)。進場與停損仍用模擬成交價。
 - **HF 上傳頻率**: HF 每個 repo 每小時最多 128 個 commit, live / paper / v1 共用 `daytrade` dataset, 11-04 09:38 paper 撞到 429。現在盤中 live.json 有事件時最快每 2 分鐘上傳一次 (被擋下的之後補傳)、沒事件每 3 分鐘, 階段變化仍立即上傳；`orb_live.py` 收盤後的當天檔案改成一個 commit (原本每檔一個)。
+- **收盤價要等收盤競價結果 (2026-11-05)**: `orb_live.py run` 13:31:01 抓 MIS 時, 驊宏資 / 萬海仍是 13:25 前的最後成交 (42.15 / 112.5), 實際收盤 43.4 / 113.0 (當晚回測分 K 與 paper 13:35 一致), 實盤紀錄因此多算約 8,500 元。新增 `MIS.closes()`: 只接受 MIS 成交時間 ≥ 13:30:00 的價格, 沒更新的每 20 秒重抓到 13:36, 仍沒有才用最後一筆並列出；live 與 paper 的收盤結算都改用它。
 ```bash
 python3 scripts/paper_orb.py run --dry --now                 # 不等時間、不下單: 算名單; 有 SINOPAC_* 時也登入模擬環境查合約 / 快照
 python3 scripts/paper_orb.py run --env-file <.env> --publish # 盤中正式跑 (08:50 後啟動, 跑到 13:35)
