@@ -64,8 +64,8 @@
   .key i { display: inline-block; width: 16px; height: 0; border-top: 2px dashed; vertical-align: middle; margin-right: 4px; }
   .empty { color: var(--ink3); padding: 16px 4px; }
   .hint { color: var(--ink3); font-size: 12px; margin-top: 8px; }
-  .tabs { display: flex; gap: 2px; margin: 0 20px 12px; border-bottom: 1px solid var(--line); }
-  .tabs button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 6px 14px; font-size: 14px; color: var(--ink2); }
+  .tabs { display: flex; gap: 2px; margin: 0 0 12px; padding: 0 20px; border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 20; background: var(--surface); }
+  .tabs button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 8px 14px; font-size: 14px; color: var(--ink2); }
   .tabs button:hover { background: none; color: var(--ink); } .tabs button.on { color: var(--ink); border-bottom-color: var(--blue); font-weight: 600; }
   .recstats { margin: 0 20px 10px; }
   #receq, #ppeq { height: 200px; }
@@ -86,25 +86,34 @@
   .recnote { color: var(--ink2); font-size: 12.5px; margin: 8px 0 0; }
   a.sid { color: var(--blue); text-decoration: none; } a.sid:hover { text-decoration: underline; }
   @media (max-width: 1150px) { .grid2 { grid-template-columns: 1fr; } }
+  @media (hover: none) { .kbhint { display: none; } }
   @media (max-width: 760px) {
-    .layout { grid-template-columns: 1fr; padding: 12px; } aside { position: static; max-height: 300px; }
-    .eqwrap { margin: 0 12px; } header { padding: 12px; } #intra { height: 340px; }
-    .tabs, .recstats { margin-left: 12px; margin-right: 12px; } .reclayout { padding: 12px; }
+    .layout { grid-template-columns: 1fr; padding: 12px; } aside { position: static; max-height: 230px; }
+    .eqwrap, .livewrap { margin-left: 12px; margin-right: 12px; } header { padding: 10px 12px 8px; gap: 4px; } header h1 { font-size: 16px; } #intra { height: 340px; }
+    .desc { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; } .desc.open { display: block; }
+    .tabs { padding: 0; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+    .tabs button { flex: 1; padding: 11px 2px 9px; font-size: 14px; white-space: nowrap; }
+    .recstats { margin-left: 12px; margin-right: 12px; } .reclayout { padding: 12px; gap: 12px; }
+    .chip { font-size: 12px; padding: 2px 6px; } .chips { gap: 4px; }
+    #livebody table td:last-child, #livebody table th:last-child { white-space: nowrap; }
+    .card { padding: 10px 8px; } .eqhead { font-size: 12px; }
+    #tab-rec > .hint { margin-left: 12px !important; margin-right: 12px !important; }
+    #recempty, #ppempty { margin-left: 12px !important; margin-right: 12px !important; }
   }
 </style>
 </head>
 <body>
 <header>
   <h1>跌破開盤區間做空 · 歷史交易</h1>
-  <span class="sub">跳空 ≥2% ∩ ATR20 ≥3% ∩ 開盤 5 分量 ≥ 日均量 5% ∩ 非處置股，跌破開盤 5 分區間低放空，突破區間高停損，否則收盤回補 (回放回測)</span>
-  <div class="chips" id="stats"></div>
+  <span class="sub desc" title="點一下展開 / 收合" onclick="this.classList.toggle('open')">跳空 ≥2% ∩ ATR20 ≥3% ∩ 開盤 5 分量 ≥ 日均量 5% ∩ 非處置股，跌破開盤 5 分區間低放空，突破區間高停損，否則收盤回補 (回放回測)</span>
 </header>
+<nav class="tabs"><button data-tab="bt" class="on">歷史回測</button><button data-tab="rec">即時訊號 (不下單)</button><button data-tab="paper">永豐模擬單</button></nav>
 <section class="livewrap" id="livewrap">
   <div class="livehead"><h2>今日即時訊號 <span class="sub">(只產生訊號、不下單)</span></h2><span id="livephase" class="phase"></span><span id="liveinfo" class="sub"></span><span id="liveupd" class="sub" style="margin-left:auto"></span></div>
   <div id="livebody" class="sub">載入中…</div>
 </section>
-<nav class="tabs"><button data-tab="bt" class="on">歷史回測</button><button data-tab="rec">即時訊號 (不下單)</button><button data-tab="paper">永豐模擬單</button></nav>
 <div id="tab-bt">
+<div class="chips recstats" id="stats"></div>
 <div class="eqwrap">
   <div class="eqhead"><span>資金曲線 (固定 300 萬、每檔額度 30 萬、整數張、不複利)　點曲線跳到該日</span><span id="eqval"></span></div>
   <div id="eq"></div><div id="ddc"></div>
@@ -123,7 +132,7 @@
         <h3>進場的股票</h3>
         <div id="trades"></div>
         <details id="othwrap"><summary id="othsum">其他監看 / 剔除</summary><div id="others"></div></details>
-        <div class="hint">↑ ↓ 切換股票，← → 切換交易日</div>
+        <div class="hint kbhint">↑ ↓ 切換股票，← → 切換交易日</div>
       </div>
       <div class="card">
         <h3 id="ctitle">K 線</h3>
@@ -321,7 +330,8 @@ function renderDayList(month) {
     return `<div class="day ${off} ${d.date === cur.date ? "sel" : ""}" data-d="${d.date}"><span>${d.date.slice(5)} (${wd(d.date)})</span>${right}</div>`;
   }).join("") : `<div class="empty">這個月沒有交易</div>`;
   $("daylist").querySelectorAll(".day").forEach((el) => el.onclick = () => loadDay(el.dataset.d));
-  const sel = $("daylist").querySelector(".sel"); if (sel) sel.scrollIntoView({ block: "nearest" });
+  const dl = $("daylist"), sel = dl.querySelector(".sel");   // 只捲清單本身 (scrollIntoView 會連整頁一起捲，手機一進來就跳到中間)
+  if (sel) { const r = sel.getBoundingClientRect(), b = dl.getBoundingClientRect(); if (r.top < b.top || r.bottom > b.bottom) dl.scrollTop += r.top - b.top - (dl.clientHeight - r.height) / 2; }
 }
 
 async function loadDay(date, sid = null, fromChart = false, quiet = false) {
@@ -459,6 +469,8 @@ async function showTab(t, recDate = null) {
   TAB = t;
   document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("on", b.dataset.tab === t));
   $("tab-bt").hidden = t !== "bt"; $("tab-rec").hidden = t !== "rec"; $("tab-paper").hidden = t !== "paper";
+  $("livewrap").hidden = t === "paper";   // 模擬單分頁有自己的「今日」卡片
+  const hd = document.querySelector("header"), top = hd.offsetTop + hd.offsetHeight; if (window.scrollY > top) window.scrollTo(0, top);
   resizeCharts();
   if (t === "paper") return showPaper(recDate);
   if (t === "bt") { if (cur.date) history.replaceState(null, "", `#${cur.date}` + (cur.sid ? `/${cur.sid}` : "")); return; }
