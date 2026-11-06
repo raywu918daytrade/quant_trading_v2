@@ -29,6 +29,7 @@ jobs:
       - name: Refresh D1 (last 3 months) from HF
         run: python3 -W ignore scripts/orb_live.py refresh --months 3 --m1-months 0
       - name: Run live (publish to HF)
+        id: run
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}   # 沒設這兩個 secret 時只印警告、不推播
@@ -36,6 +37,14 @@ jobs:
         run: |
           F=""; [ -n "${{ github.event.inputs.force }}" ] && F="--force"
           python3 -W ignore scripts/orb_live.py run --publish --line $F
+      - name: LINE alert if the job failed before / outside the run step
+        # run 步驟自己出錯時程式已推過 (outcome == failure), 這裡只補: 安裝 / refresh 失敗、逾時或被取消
+        if: (failure() || cancelled()) && steps.run.outcome != 'failure'
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+        run: |
+          python3 -W ignore scripts/orb_live.py line-test --text "❌ $(date '+%Y-%m-%d %H:%M') live.yml 失敗 / 中斷 (run 步驟: ${{ steps.run.outcome || '未執行' }}), 請看 GitHub Actions log" || true
       - name: Upload signals as run artifact (backup)
         if: always()
         uses: actions/upload-artifact@v4

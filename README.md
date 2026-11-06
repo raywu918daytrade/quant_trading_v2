@@ -288,7 +288,9 @@ cron-job.org (平日, 台灣時間)
 
 ### LINE 推播 (2026-11-05) — `orb_live.py run --line`
 live.yml 盤中把訊號推到自己的 LINE (LINE Notify 已於 2025-03 停用, 改用官方帳號的 Messaging API push)。
-- 推播內容: SHORT 進場 (代號、成交價、張數、停損價)、STOP 停損、13:24 收盤回補提醒 (持有檔數與張數)、13:31 結算 (逐檔報酬與損益、平均、勝率、合計)。不推 09:05 監看名單、FULL、「今日不交易」。
+- 推播內容: SHORT 進場 (代號、成交價、張數、停損價)、STOP 停損、13:24 收盤回補提醒 (持有檔數與張數)、13:31 結算 (逐檔報酬與損益、平均、勝率、合計)。不推 09:05 監看名單、FULL。
+- **每天都會有一則 (2026-11-06 起)**: 不交易的日子也推, 才知道系統是活的 — 😴 週一不交易 / 非交易日 (MIS 日期不是今天)、⛔ 今日不交易 (原因 + 大盤平均跳空 + 上漲家數比 + 候選檔數)。交易日則至少有 13:31 結算那一則。
+- **出錯也推**: `run` 中途拋例外或被中斷 → ❌ 錯誤類型與訊息；live.yml 在 run 之前就失敗 (安裝 / refresh)、逾時或被取消 → 另一個步驟用 `line-test --text` 推 ❌。所以平日 09:05 前沒收到任何 LINE 就代表排程根本沒啟動 (cron-job.org / GitHub)。
 - 額度: 免費方案每月 200 則 (push 給 1 人算 1 則)。同一次 10 秒輪詢內的多檔事件合併成 1 則；日均進場 5~6 檔、約一半停損 → 每天約 10 則、每月約 170 則。超過額度 LINE 回 429, 程式只印警告、不影響訊號與 HF 上傳。
 - 一次性設定: (1) [LINE Official Account Manager](https://manager.line.biz/) 建官方帳號 → 設定 → Messaging API → 啟用；(2) [LINE Developers Console](https://developers.line.biz/console/) 該 channel 的 Messaging API 分頁發 Channel access token (long-lived), Basic settings 分頁最下面抄 Your user ID (`U` 開頭 33 碼)；(3) 用自己的 LINE 加該官方帳號好友 (沒加好友 push 會失敗)；(4) GitHub repo Secrets 加 `LINE_CHANNEL_ACCESS_TOKEN`、`LINE_USER_ID`。沒設 secret 時 live.yml 照跑, 只印「不推播」。
 - 測試: `LINE_CHANNEL_ACCESS_TOKEN=... LINE_USER_ID=... python3 scripts/orb_live.py line-test` 推一則測試訊息 (成功 exit 0)。本機盤中也可 `run --line`。

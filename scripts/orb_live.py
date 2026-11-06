@@ -539,13 +539,22 @@ def notify(title, msg):
     except Exception: pass
 
 def cmd_run(a):
+    """包一層: 程式出錯 / 被中斷時也推一則 LINE, 才知道系統是死是活。sys.exit (非交易日) 不算錯。"""
+    line = Line(a.line)
+    try: _run(a, line)
+    except (Exception, KeyboardInterrupt) as e:
+        line.push(f"❌ {now_tw():%Y-%m-%d %H:%M:%S} orb_live 出錯中斷\n{type(e).__name__}: {str(e)[:300]}\n(GitHub → Actions → Live signals 看 log)")
+        raise
+
+def _run(a, line):
     today = pd.Timestamp(now_tw().date()); ds = str(today.date())
     SIG.mkdir(exist_ok=True)
-    pub = Publisher(a.publish); line = Line(a.line)
+    pub = Publisher(a.publish)
     pool, last = cmd_pool(argparse.Namespace(date=None))
     pub.push(live_state(ds, "盤前", note=f"盤前池 {int(pool.in_pool.sum())} 檔 (D1 最後 {last.date()})"), force=True)
     if today.dayofweek in P["NO_DOW"] and not a.force:
         print("今天週一, 規則不交易 (加 --force 仍可跑完, 僅供觀察)。")
+        line.push(f"😴 {ds} 週一, 規則不交易 (系統正常運作)")
         pub.push(live_state(ds, "不交易", note="週一不交易"), force=True); return
     elig = None if a.no_eligibility else fetch_eligible(ds)
     mis = MIS()
@@ -555,12 +564,14 @@ def cmd_run(a):
     mis_day = snap.mis_d.dropna().mode()
     if len(mis_day) == 0 or mis_day.iloc[0] != today.strftime("%Y%m%d"):
         msg = f"MIS 回傳日期 {mis_day.iloc[0] if len(mis_day) else '無'} ≠ 今天, 可能非交易日或尚未開盤"
-        print(msg + ", 結束。"); pub.push(live_state(ds, "非交易日", note=msg), force=True); sys.exit(0 if a.publish else 2)
+        print(msg + ", 結束。"); line.push(f"😴 {ds} 非交易日 / 休市, 不交易 (系統正常運作)\n{msg}"); pub.push(live_state(ds, "非交易日", note=msg), force=True); sys.exit(0 if a.publish else 2)
     cand, info = open_stage(pool, snap.rename(columns={"o": "open"}), today)
     info["n_cand"] = len(cand)
     print(f"09:02 開盤: 有開盤價 {info['n_open']}/{info['n_liq']}；大盤平均跳空 {info['mkt_gap']*100:+.2f}%  上漲家數比 {info['breadth']*100:.0f}%；跳空≥2% 的池內候選 {len(cand)} 檔")
     if not info["trade_ok"]:
         print("今日不交易: " + "；".join(info["reasons"]))
+        line.push(f"⛔ {ds} 今日不交易: " + "；".join(info["reasons"]) + f"\n大盤平均跳空 {info['mkt_gap']*100:+.2f}%  上漲家數比 {info['breadth']*100:.0f}%  候選 {len(cand)} 檔"
+                  + ("\n(--force: 照跑, 僅供觀察)" if a.force else "") + "\n(系統正常運作)")
         if not a.force:
             cand.to_csv(SIG / f"{ds}_cand.csv", index=False)
             pub.push(live_state(ds, "不交易", info, cand=cand, note="；".join(info["reasons"])), force=True); pub.upload_day(ds); return
@@ -625,7 +636,7 @@ def cmd_run(a):
     pub.push(live_state(ds, "已結算", info, book, mem, excl), force=True); pub.upload_day(ds)
 
 def cmd_line_test(a):
-    ok = Line(True).push(f"✅ orb_live LINE 測試 {now_tw():%Y-%m-%d %H:%M:%S}")
+    ok = Line(True).push(a.text or f"✅ orb_live LINE 測試 {now_tw():%Y-%m-%d %H:%M:%S}")
     print("LINE 推播成功" if ok else "LINE 推播失敗"); sys.exit(0 if ok else 1)
 
 def cmd_replay(a):
@@ -685,7 +696,7 @@ def main():
     p.add_argument("--publish", action="store_true", help="把盤中狀態上傳到 HF db/orb/live.json (需環境變數 HF_TOKEN)")
     p = sp.add_parser("replay"); p.add_argument("--date", required=True); p.add_argument("--eligibility", action="store_true")
     p = sp.add_parser("verify"); p.add_argument("--start", required=True); p.add_argument("--end", required=True)
-    sp.add_parser("line-test")
+    p = sp.add_parser("line-test"); p.add_argument("--text", default="", help="自訂訊息 (預設: 測試訊息)")
     a = ap.parse_args()
     {"refresh": lambda a: refresh(a.months, a.m1_months), "pool": cmd_pool, "run": cmd_run, "replay": cmd_replay, "verify": cmd_verify, "line-test": cmd_line_test}[a.cmd](a)
 
