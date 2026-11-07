@@ -26,6 +26,7 @@ import numpy as np, pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import ROOT, RAW, PROC, COST, HF_REPO, HF_PREFIX
+from quotes import make_quotes
 
 TZ = ZoneInfo("Asia/Taipei")
 LIVE = ROOT / "data" / "live"
@@ -557,7 +558,7 @@ def _run(a, line):
         line.push(f"😴 {ds} 週一, 規則不交易 (系統正常運作)")
         pub.push(live_state(ds, "不交易", note="週一不交易"), force=True); return
     elig = None if a.no_eligibility else fetch_eligible(ds)
-    mis = MIS()
+    mis = make_quotes()                                   # MIS (預設) 或 Redis, 由環境變數 QUOTE_SOURCE 決定 (scripts/quotes.py)
     # ---- 09:02 開盤價 / 大盤跳空 ----
     if not a.now: wait_until(9, 2, 0)
     snap = mis.snapshot(pool.stock_id.tolist(), pool.market_type.tolist())

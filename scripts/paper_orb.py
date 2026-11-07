@@ -39,6 +39,7 @@ import numpy as np, pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import orb_live as OL
+from quotes import make_quotes
 from config import ROOT, COST, HF_REPO, HF_PREFIX
 
 TZ = OL.TZ
@@ -578,7 +579,7 @@ def cmd_run(a):
     if today.dayofweek in OL.P["NO_DOW"] and not a.force:
         no_trade_day(ds, dict(trade_ok=False, reasons=["週一不交易"]), pub, "週一不交易"); return
     elig = None if a.no_eligibility else OL.fetch_eligible(ds)
-    mis = OL.MIS()
+    mis = make_quotes()                                   # MIS (預設) 或 Redis, 由 QUOTE_SOURCE 決定 (scripts/quotes.py)
     # ---- 09:02 開盤 ----
     if not a.now: OL.wait_until(9, 2, 0)
     snap = mis.snapshot(pool.stock_id.tolist(), pool.market_type.tolist())

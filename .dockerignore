@@ -1,0 +1,8 @@
+# 只把 scripts/、requirements.txt、deploy/ 進映像; 資料與研究產物都不要
+*
+!scripts/
+!scripts/**
+!requirements.txt
+!deploy/constraints.txt
+!deploy/entrypoint.sh
+scripts/__pycache__/

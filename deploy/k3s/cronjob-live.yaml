@@ -1,0 +1,59 @@
+# fade-live: 平日 08:50 啟動, 自己等 09:02 / 09:05, 每 10 秒輪詢到 13:31 結算 (約 4.7 小時)。失敗不重跑 (backoffLimit 0: 半天重跑沒有意義, 由 LINE 推錯誤)。
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: fade-live
+  labels:
+    app.kubernetes.io/component: live
+spec:
+  schedule: "50 8 * * 1-5"
+  timeZone: Asia/Taipei              # 需 K8s ≥ 1.27 (K3s 現行版本都有); 不用自己換算 UTC
+  concurrencyPolicy: Forbid          # 上一次還在跑就不開第二個
+  startingDeadlineSeconds: 600       # 錯過排程 10 分鐘內仍會補跑 (例如節點重開)
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 18000
+      ttlSecondsAfterFinished: 259200   # 3 天後清掉 Job/Pod (log 由 healthchecks + LINE 補)
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/component: live
+        spec:
+          restartPolicy: Never
+          priorityClassName: batch           # 叢集最低優先, 報價系統 (market-data) 永遠優先
+          nodeSelector:
+            kubernetes.io/arch: arm64        # 映像是多架構, 但 AMD micro 只有 1 GB, 放不下
+          imagePullSecrets:
+            - name: ghcr                     # GHCR package 設成 public 後可拿掉
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+          containers:
+            - name: fade
+              image: ghcr.io/raywu918daytrade/fade:latest
+              imagePullPolicy: IfNotPresent
+              args: ["live"]
+              envFrom:
+                - configMapRef: { name: fade-env }
+                - secretRef: { name: fade-hf }
+                - secretRef: { name: fade-line }
+              env:
+                - name: HC_URL
+                  valueFrom:
+                    secretKeyRef: { name: fade-healthchecks, key: HC_LIVE, optional: true }
+              resources:
+                requests: { cpu: "100m", memory: "256Mi" }
+                limits: { cpu: "500m", memory: "768Mi" }
+              volumeMounts:
+                - { name: data, mountPath: /app/data, subPath: live/data }
+                - { name: data, mountPath: /app/signals, subPath: live/signals }
+                - { name: data, mountPath: /app/paper, subPath: live/paper }
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: fade-data

@@ -1,0 +1,20 @@
+# fade 的 K3s 部署 (方案 B: 全部跑在 ARM 節點)。叢集層的 namespace `fade`、PriorityClass `batch`、NetworkPolicy 由叢集 session 提供, 這裡只引用名字。
+# 套用: kubectl apply -k deploy/k3s   (先建 Secret, 見 secrets.example.yaml 與 README「K3s 部署」)
+# 釘版本: kubectl kustomize 時改 images.newTag 成 docker.yml 打的 sha-xxxxxxx
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: fade
+labels:
+  - pairs:
+      app.kubernetes.io/name: fade
+      app.kubernetes.io/part-of: quant-trading
+resources:
+  - pvc.yaml
+  - configmap.yaml
+  - cronjob-live.yaml
+  - cronjob-paper.yaml
+  - cronjob-nightly.yaml
+  - cronjob-nightly-retry.yaml
+images:
+  - name: ghcr.io/raywu918daytrade/fade
+    newTag: latest

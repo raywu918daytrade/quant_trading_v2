@@ -1,0 +1,14 @@
+# 一顆 PVC, 三個工作各用一個子目錄 (live / paper / nightly 08:50 同時跑, 分開避免同時寫 data/live/*.parquet):
+#   <job>/data     = /app/data     (HF 下載的 d1/m1/info、hf-cache、processed、web_export)
+#   <job>/signals  = /app/signals  (orb_live 當日輸出, 收盤後也上傳 HF)
+#   <job>/paper    = /app/paper    (paper_orb 當日輸出)
+# K3s 預設 StorageClass local-path (節點本機目錄), ReadWriteOnce; 全部 CronJob 都在同一台 ARM 節點所以可以共用。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fade-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
