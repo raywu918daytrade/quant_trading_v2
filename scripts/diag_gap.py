@@ -4,9 +4,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import numpy as np, pandas as pd
 import orb_live as OL
+from quotes import make_quotes
 pool, last = OL.cmd_pool(argparse.Namespace(date=None))
 print("D1 最後日期", last.date(), "流動股", len(pool))
-snap = OL.MIS().snapshot(pool.stock_id.tolist(), pool.market_type.tolist())
+snap = make_quotes().snapshot(pool.stock_id.tolist(), pool.market_type.tolist())
 x = pool.merge(snap, on="stock_id", how="left")
 x["d1_vs_y"] = x.pc / x.y - 1; x["gap_d1"] = x.o / x.pc - 1; x["gap_y"] = x.o / x.y - 1
 print("MIS 日期", snap.mis_d.dropna().mode().tolist(), "時間樣本", snap.mis_t.dropna().head(3).tolist())

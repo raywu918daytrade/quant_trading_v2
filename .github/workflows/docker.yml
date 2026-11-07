@@ -1,0 +1,46 @@
+name: Build image (amd64 + arm64 → GHCR)
+on:
+  # main 上動到映像內容才重建 (public repo 的 Actions 免費)。手動也可。
+  push:
+    branches: [main]
+    paths: [Dockerfile, .dockerignore, requirements.txt, "deploy/constraints.txt", "deploy/entrypoint.sh", "scripts/**", ".github/workflows/docker.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
+concurrency:
+  group: docker-build
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3        # arm64 用 QEMU 模擬; 相依全是 wheel, 不需編譯, 幾分鐘內完成
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/fade
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test (arm64 via QEMU: import deps, show versions)
+        run: |
+          docker run --rm --platform linux/arm64 ghcr.io/${{ github.repository_owner }}/fade:sha-$(git rev-parse --short HEAD) \
+            shell python3 -c "import platform, pandas, pyarrow, numpy, huggingface_hub, shioaji, redis; print(platform.machine(), 'pandas', pandas.__version__, 'pyarrow', pyarrow.__version__, 'shioaji', shioaji.__version__)"

@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fade-env
+data:
+  TZ: Asia/Taipei
+  PYTHONUNBUFFERED: "1"
+  HF_HUB_DISABLE_PROGRESS_BARS: "1"
+  HF_HOME: /app/data/hf-cache
+  # 即時行情來源: mis = 證交所 MIS (現況); redis = 報價系統 (market-data namespace) 的 1 分 K stream。
+  # 先用 mis 上線, 與 Redis 版並行比對過 09:02 跳空 / 09:05 區間 / 進出場價 之後再切 (scripts/quotes.py)。
+  QUOTE_SOURCE: mis
+  REDIS_URL: redis://redis.market-data.svc.cluster.local:6379/0
+  REDIS_M1_STREAM: stream:m1

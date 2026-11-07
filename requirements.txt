@@ -3,3 +3,4 @@ pyarrow
 numpy
 requests
 huggingface_hub>=0.25
+redis>=5

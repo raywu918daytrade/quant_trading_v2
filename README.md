@@ -336,3 +336,24 @@ cron-job.org 08:50 → paper.yml: orb_live.py refresh (D1) → paper_orb.py run 
 - **收盤價要等收盤競價結果 (2026-11-05)**: `orb_live.py run` 13:31:01 抓 MIS 時, 驊宏資 / 萬海仍是 13:25 前的最後成交 (42.15 / 112.5), 實際收盤 43.4 / 113.0 (當晚回測分 K 與 paper 13:35 一致), 實盤紀錄因此多算約 8,500 元。新增 `MIS.closes()`: 只接受 MIS 成交時間 ≥ 13:30:00 的價格, 沒更新的每 20 秒重抓到 13:36, 仍沒有才用最後一筆並列出；live 與 paper 的收盤結算都改用它。
 - **09:02 昨收改用 MIS 的 y (2026-11-06)**: 當天 09:02 算出大盤平均跳空 −9.00%、上漲家數 0%, live 與 paper 判定不交易。用 `scripts/diag_gap.py` (workflow「Diag gap」) 查證: D1 昨收與 MIS 公布的昨收 y 完全相同, MIS 開盤價也是真的 (台塑 65.1→58.9、南亞 249→224.5 跌停開、新纖 22→20.0), 當天確實全面大跌開盤, **不是 bug**, 依規則不交易是正確的。保留的改動: 盤中 `open_stage` 以 MIS 的 y 為昨收 (D1 與 y 差 >1% 會印警告), 大盤平均跳空 < −7% 印提醒。回放 / 回測仍用 D1。
 - **模擬損益 vs 訊號價損益的誤差: 主要是時間差 (2026-11-07 分析)**: 11-04 差 −20,535: 09:05:03 前後 10 檔同時跌破, 但第一張單 09:05:14 才送、最後一張 09:05:25 (觸發 → 送單 5~18 秒), 因為 (1) 主迴圈先同步上傳一次 HF live.json 才開始處理訊號、(2) `place_order` 阻塞, 一張送完 (0.6~3 秒) 才送下一張；進場 + 停損差約 −1 萬, 另約 −6 千是模擬環境收盤回報價錯誤 (已於 11-05 修正)。11-05 差 −3,742 全在進場: 觸發 → 送單回應 0.65~0.97 秒, 其中「第一筆跌破 tick 本來就低 1 檔」約 −1,300 (無法避免), 延遲期間價格續跌約 −2,450 (驊宏資 1 秒內 45.05 → 44.7)。**改動**: 訊號由 dispatcher 執行緒丟進執行緒池並行 `place_order` (每檔一把鎖, 保證 券賣 → 停損 順序; 13:25 收盤回補後晚到的停損事件會略過), HF live.json 改背景執行緒上傳 (原子寫檔), 主迴圈的 HF / update_status 不再擋送單。`order_time` 改為呼叫 place_order **前**的送出時間, 新增 `ack_time` / `ack_ms` (券商回應) 與 `tick_to_order_ms` (觸發 tick → 送出; summary `tick_to_order_ms_median`, 網頁顯示「觸價到送單」)。本機假券商 (每張阻塞 0.8 秒) 測試: 10 檔同時跌破, 舊版最後一張晚 7.2 秒送出, 新版 10 張在 2 ms 內全部送出。剩下的延遲是 GitHub Actions 機器在美國、到永豐的網路往返 (每張 ~0.6 秒以上), 要再縮短只能把 paper 搬到台灣的機器跑。
+
+## K3s 部署 (2026-11-07, 方案 B: Oracle Always Free, ARM A1 節點) — `Dockerfile` + `deploy/` + `.github/workflows/docker.yml`
+目標: 三個排程從「cron-job.org → GitHub Actions」搬到自建 K3s 的 CronJob, 之後即時行情改吃叢集內報價系統 (market-data namespace) 的 Redis, 不再自己打 MIS。研究腳本 (01~33) 留在 Mac; 網頁仍是 GitHub Pages 讀 HF, 不搬。fade 與 quant_trading 各自獨立 (各自映像、各自 CronJob), 不合併。
+```
+映像   ghcr.io/raywu918daytrade/fade  (linux/amd64 + linux/arm64; docker.yml 在 main 動到 scripts/ requirements.txt Dockerfile deploy/ 時用 buildx + QEMU 重建並推 GHCR, 另做 arm64 smoke test)
+入口   deploy/entrypoint.sh <live|paper|nightly|diag|shell ...>  (同 GHA 三個 workflow 的步驟; HC_URL 有設就 ping healthchecks.io 的 /start、成功、/<exit code>)
+版本   deploy/constraints.txt (pandas / pyarrow / numpy / huggingface_hub / shioaji 釘版, 全部有 aarch64 wheel, 不需編譯)
+部署   deploy/k3s/  kustomize: pvc (5Gi, 三個工作各自子目錄) + configmap (TZ、HF cache、QUOTE_SOURCE、REDIS_URL) + 4 個 CronJob
+         fade-live           50 8 * * 1-5   live     100m/256Mi → 500m/768Mi   期限 5h, backoffLimit 0   secret: fade-hf, fade-line
+         fade-paper          50 8 * * 1-5   paper    100m/384Mi → 500m/1Gi     期限 5h, backoffLimit 0   secret: fade-hf, fade-sinopac
+         fade-nightly         0 21 * * 1-5  nightly  200m/1Gi → 1/2Gi          期限 30m, backoffLimit 2  secret: fade-hf
+         fade-nightly-retry  10 8 * * 1-5   nightly  同上
+       全部 timeZone Asia/Taipei、priorityClassName batch (叢集最低)、nodeSelector arm64、非 root (uid 1000)。namespace `fade`、PriorityClass `batch`、NetworkPolicy 由叢集層提供, 這裡只引用。
+行情   scripts/quotes.py make_quotes(): QUOTE_SOURCE=mis (預設, 現況) 或 redis (REDIS_M1_STREAM=stream:m1 的 1 分 K 累積成 MIS.snapshot 同格式; y/u/w 沒有 → 用 D1 昨收與昨收×1.1)。
+```
+- 建 Secret (值由使用者自己貼, 不進版控; 範本 `deploy/k3s/secrets.example.yaml`): `fade-hf` (HF_TOKEN)、`fade-line`、`fade-sinopac`、`fade-healthchecks` (HC_LIVE / HC_PAPER / HC_NIGHTLY / HC_NIGHTLY_RETRY)、`ghcr` (docker-registry; GHCR package 設 public 後可拿掉)。之後改 sealed-secrets。
+- 套用: `kubectl apply -k deploy/k3s`；手動跑一次: `kubectl -n fade create job --from=cronjob/fade-nightly nightly-manual`；除錯: `kubectl -n fade run -it --rm fade-sh --image=ghcr.io/raywu918daytrade/fade -- shell bash`。
+- 記憶體依據 (2026-11-07 本機實測): D1 6 個月 27 萬列 19 MB, M1 一個月 374 萬列 225 MB, 單日回放 peak RSS 0.9 GB; live/paper 不載 M1。
+- 切換順序 (ARM 到手後): (1) nightly 先 (無狀態, 失敗沒損失), 跟 GHA 版各跑一晚比 HF 上的 history parquet; (2) live: K3s 版先 `FADE_RUN_ARGS` 不帶 --publish / --line 跑一週, 比 signals/ 與 GHA 版的 db/orb/live/<date>/; (3) paper 最後 (永豐同一把 key 的同時連線數)。切完才停 cron-job.org 的 job (保留 GHA workflow 當備援)。
+- Redis 版行情上線前要比: 同一天 MIS 與 Redis 的 09:02 大盤平均跳空、09:05 區間高低、進場 / 回補價。報價系統只訂 tick_universe 前 N 檔, 池內股票不在訂閱範圍就沒有行情。
+- 共用額度 (各自部署仍會互相影響): HF dataset 每小時 128 commits (報價系統每分鐘 1 次); 永豐同一把 key 同時 3 個登入 (quant sr / base + fade paper); 同一個 Oracle IP 打 MIS。

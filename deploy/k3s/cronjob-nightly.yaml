@@ -1,0 +1,58 @@
+# fade-nightly: 平日 21:00 (HF 分 K 定稿後) 下載 history → 回放補新交易日 → 匯出網頁 JSON → 1 個 commit 上傳 HF。無狀態 (每次從 HF 下載上次的 history), 失敗可重跑。實測載一個 M1 月檔 peak ~1 GB。
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: fade-nightly
+  labels:
+    app.kubernetes.io/component: nightly
+spec:
+  schedule: "0 21 * * 1-5"
+  timeZone: Asia/Taipei              # 需 K8s ≥ 1.27 (K3s 現行版本都有); 不用自己換算 UTC
+  concurrencyPolicy: Forbid          # 上一次還在跑就不開第二個
+  startingDeadlineSeconds: 600       # 錯過排程 10 分鐘內仍會補跑 (例如節點重開)
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 1800
+      ttlSecondsAfterFinished: 259200   # 3 天後清掉 Job/Pod (log 由 healthchecks + LINE 補)
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/component: nightly
+        spec:
+          restartPolicy: Never
+          priorityClassName: batch           # 叢集最低優先, 報價系統 (market-data) 永遠優先
+          nodeSelector:
+            kubernetes.io/arch: arm64        # 映像是多架構, 但 AMD micro 只有 1 GB, 放不下
+          imagePullSecrets:
+            - name: ghcr                     # GHCR package 設成 public 後可拿掉
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+          containers:
+            - name: fade
+              image: ghcr.io/raywu918daytrade/fade:latest
+              imagePullPolicy: IfNotPresent
+              args: ["nightly"]
+              envFrom:
+                - configMapRef: { name: fade-env }
+                - secretRef: { name: fade-hf }
+              env:
+                - name: HC_URL
+                  valueFrom:
+                    secretKeyRef: { name: fade-healthchecks, key: HC_NIGHTLY, optional: true }
+              resources:
+                requests: { cpu: "200m", memory: "1Gi" }
+                limits: { cpu: "1", memory: "2Gi" }
+              volumeMounts:
+                - { name: data, mountPath: /app/data, subPath: nightly/data }
+                - { name: data, mountPath: /app/signals, subPath: nightly/signals }
+                - { name: data, mountPath: /app/paper, subPath: nightly/paper }
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: fade-data
