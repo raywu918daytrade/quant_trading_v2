@@ -591,7 +591,7 @@ async function loadPaperIndex() {
   let rows = [];
   try { rows = await DS.paperCSV("summary.csv"); } catch (e) { }
   const K = ["mkt_gap_pct", "n_cand", "n_watch", "n_signal", "n_filled", "n_stop", "n_close", "n_unclosed", "n_skipped", "n_full", "entry_slip_ticks", "entry_trigger_ticks",
-    "entry_exec_ticks", "stop_slip_ticks", "close_slip_ticks", "detect_ms_median", "tick_to_fill_ms_median", "sim_avg_net_pct", "ideal_avg_net_pct", "sim_pnl", "ideal_pnl"];
+    "entry_exec_ticks", "stop_slip_ticks", "close_slip_ticks", "detect_ms_median", "tick_to_order_ms_median", "tick_to_fill_ms_median", "sim_avg_net_pct", "ideal_avg_net_pct", "sim_pnl", "ideal_pnl"];
   let cs = 0, ci = 0;
   PP.days = rows.filter((r) => /^\d{4}-\d\d-\d\d$/.test(r.date)).sort((a, b) => a.date < b.date ? -1 : 1).map((r) => {
     const d = { ...r, trade_ok: r.trade_ok === "True" }; K.forEach((k) => d[k] = num(r[k]));
@@ -639,6 +639,7 @@ async function loadPaperDay(date) {
     ["模擬", yuan(d.sim_pnl)], ["訊號價", yuan(d.ideal_pnl)]];
   if (d.entry_trigger_ticks !== null) ch.push(["進場差拆解", `觸發 ${tk1(d.entry_trigger_ticks)} + 執行 ${tk1(d.entry_exec_ticks)} 檔`]);
   if (d.detect_ms_median !== null) ch.push(["收到行情延遲 (中位)", secs(d.detect_ms_median)]);
+  if (d.tick_to_order_ms_median !== null) ch.push(["觸價到送單 (中位)", secs(d.tick_to_order_ms_median)]);
   if (d.tick_to_fill_ms_median !== null) ch.push(["觸價到成交 (中位)", secs(d.tick_to_fill_ms_median)]);
   if (!d.trade_ok) ch.push(["不交易", d.reasons]);
   $("ppchips").innerHTML = ch.map(([k, v]) => `<span class="chip">${k} <b>${v}</b></span>`).join("");

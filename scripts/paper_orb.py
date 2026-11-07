@@ -11,6 +11,9 @@
             tick < 區間低 → 立即市價「現股當沖先賣」(daytrade_short)
             tick > 區間高 → 立即市價買回 (停損); 只買回券賣實際成交的張數, 未成交的券賣單先取消
           永豐沒有股票觸價單 API, 所以是「tick 偵測 → 市價單」, 並記錄偵測延遲 (收到 tick 的本機時間 − 交易所 tick 時間)
+          低延遲 (2026-11-07): 訊號由專用 dispatcher 執行緒取出, 丟進執行緒池並行 place_order (同一檔用鎖保證 券賣 → 停損 的順序);
+          HF 上傳改在背景執行緒, 主迴圈的上傳 / update_status 都不會再擋住送單。
+          (11-04 實測: 舊版在 09:05 一次 10 檔跌破時, 先等 HF 上傳、再逐張阻塞送單, 觸發到送出 5~18 秒)
   13:25   其餘部位以漲停價限價 ROD 買回 (13:25 起收盤集合競價不收市價單, op_code 88), 以 13:30 收盤價成交
   13:35   結算: 每檔每一腳 (進場 / 停損 / 收盤) 的 訊號價、觸發 tick、委託 / 成交時間、成交價、滑價 (元 / 檔 / %)、損益
           寫 paper/<date>_trades.csv、_slippage.csv、_events.csv、_summary.json; --publish 時上傳 HF db/orb/paper/,
@@ -27,6 +30,7 @@
   python3 scripts/paper_orb.py replay --date 2026-10-22                    # 離線: 用歷史分 K 合成 tick + 假券商, 走完整個下單/結算流程
 """
 import argparse, csv, io, json, os, queue, sys, threading, time, warnings
+from concurrent.futures import ThreadPoolExecutor
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -46,6 +50,7 @@ AUCTION_T = (13, 25, 10)      # 收盤集合競價開始後, 剩餘部位以漲�
 END_T = (13, 35, 0)
 LIVE_EVERY = 180              # 盤中至少每 3 分鐘上傳一次 live.json
 EVENT_GAP = 120               # 有事件時最快每 2 分鐘上傳一次 (HF 每個 repo 每小時最多 128 個 commit, live / paper / v1 共用)
+ORDER_WORKERS = 12            # 同時送單的執行緒數 (每日最多 10 檔 + 停損): 多檔同時跌破時並行送出, 不再一張等一張
 
 
 def now(): return datetime.now(TZ)
@@ -208,6 +213,28 @@ class PaperOrb:
         self.skipped = {}; self.events = []; self.dirty = False
         self._cur = None; self.clock = now     # replay 換成合成 tick 的時間
         self.book.log = self._on_book_event
+        self.sid_lock = defaultdict(threading.RLock)   # 同一檔的 券賣 / 停損 / 收盤 / 補單 依序執行
+        self.pool = None                               # start() 後: 訊號並行送單; replay 不開 (process() 同步處理, 結果可重現)
+
+    def start(self, workers=ORDER_WORKERS):
+        """盤中低延遲模式: dispatcher 執行緒一收到 Book 事件就丟進執行緒池送單, 不經過主迴圈。"""
+        self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="order")
+        def loop():
+            while True:
+                e = self.q.get()
+                if e is None: break
+                self.pool.submit(self._handle_safe, e)
+        self._disp = threading.Thread(target=loop, name="dispatch", daemon=True); self._disp.start()
+
+    def stop(self):
+        if self.pool is None: return
+        self.q.put(None); self._disp.join(5); self.pool.shutdown(wait=True); self.pool = None
+
+    def _handle_safe(self, e):
+        try:
+            with self.sid_lock[e["stock_id"]]: self._handle(e)
+        except Exception as ex:
+            log("送單執行緒錯誤:", e.get("stock_id"), ex)
 
     # ---- 行情 ----
     def on_tick(self, *args):
@@ -270,6 +297,8 @@ class PaperOrb:
 
     # ---- 下單 ----
     def process(self, timeout=0.5):
+        if self.pool is not None:                     # 低延遲模式由 dispatcher 處理
+            time.sleep(timeout); return
         try: e = self.q.get(timeout=timeout)
         except queue.Empty: return
         while True:
@@ -285,12 +314,15 @@ class PaperOrb:
             if why:
                 self.skipped[sid] = why; L["status"] = "skipped"; log(f"✗ {sid} 跌破但不下單: {why}"); return
             try:
-                tr, st = self.broker.sell_short(sid, p["lots"]); L["order_time"] = self.clock(); L["status"] = st
+                L["order_time"] = self.clock()                 # 送出時間 (呼叫 place_order 前)
+                tr, st = self.broker.sell_short(sid, p["lots"]); L["ack_time"] = self.clock(); L["status"] = st
                 self.orders[(sid, "Sell")].append(tr)
-                log(f"券賣 {sid} {p['name']} {p['lots']} 張 市價 (觸發 {e['tick_px']} < 區間低 {p['rl']:g}, tick {hms(e['tick_time'])}, 收到 {hms(e['recv_time'])}) → {st}")
+                log(f"券賣 {sid} {p['name']} {p['lots']} 張 市價 (觸發 {e['tick_px']} < 區間低 {p['rl']:g}, tick {hms(e['tick_time'])}, 收到 {hms(e['recv_time'])}, "
+                    f"送出 {hms(L['order_time'])} 回應 {hms(L['ack_time'])}) → {st}")
             except Exception as ex:
                 L["status"] = f"委託失敗: {ex}"; self.skipped[sid] = L["status"]; log("✗", sid, L["status"])
         elif e["event"] == "STOP":
+            if "exit" in self.leg[sid]: return            # 13:25 收盤回補已先處理 (並行模式下停損事件可能晚到)
             self.leg[sid]["exit"] = dict(leg="stop", signal_px=p["rh"], trigger_px=e["tick_px"], tick_time=e["tick_time"], recv_time=e["recv_time"])
             self.cover(sid)
         elif e["event"] == "FULL":
@@ -314,7 +346,8 @@ class PaperOrb:
     def _buy(self, sid, q, limit_px):
         L = self.leg[sid]["exit"]
         try:
-            tr, st = self.broker.buy(sid, q, limit_px=limit_px); L.setdefault("order_time", self.clock()); L["status"] = st
+            t0 = self.clock()
+            tr, st = self.broker.buy(sid, q, limit_px=limit_px); L.setdefault("order_time", t0); L.setdefault("ack_time", self.clock()); L["status"] = st
             L["ordered"] = L.get("ordered", 0) + q
             self.orders[(sid, "Buy")].append(tr)
             log(f"買回 {sid} {q} 張 {f'限價 {limit_px:g} (收盤競價)' if limit_px else '市價'} ({L['leg']}) → {st}")
@@ -328,22 +361,28 @@ class PaperOrb:
             if not L or "ordered" not in L: continue
             _, q, _ = self.filled((sid, "Sell"))
             if q > L["ordered"]:
-                log(f"⚠ {sid} 券賣成交 {q} 張 > 已買回 {L['ordered']} 張, 補買回差額")
-                self._buy(sid, q - L["ordered"], self.broker.limit_up(sid) if self.clock() >= self.clock().replace(hour=AUCTION_T[0], minute=AUCTION_T[1], second=AUCTION_T[2], microsecond=0) else None)
+                with self.sid_lock[sid]:
+                    _, q, _ = self.filled((sid, "Sell"))
+                    if q <= L["ordered"]: continue
+                    log(f"⚠ {sid} 券賣成交 {q} 張 > 已買回 {L['ordered']} 張, 補買回差額")
+                    self._buy(sid, q - L["ordered"], self.broker.limit_up(sid) if self.clock() >= self.clock().replace(hour=AUCTION_T[0], minute=AUCTION_T[1], second=AUCTION_T[2], microsecond=0) else None)
 
     def close_all(self, limit=True):
         """13:25 後: Book 仍在 SHORT 的部位, 以漲停價限價買回 (= 以收盤價成交)."""
         with self.lock:
             self.closing = True; holding = [s for s, p in self.book.s.items() if p["state"] == "SHORT"]
         for sid in holding:
-            if "exit" in self.leg[sid] or self.leg[sid].get("entry", {}).get("status") == "skipped": continue
-            self.leg[sid]["exit"] = dict(leg="close", signal_px=np.nan, trigger_px=np.nan, tick_time=None, recv_time=None)
-            lim = None
-            if limit:
-                try: lim = self.broker.limit_up(sid)
-                except Exception: lim = self.w[sid]["lu"]
-            self.cover(sid, lim)
+            with self.sid_lock[sid]: self._close_one(sid, limit)
         return holding
+
+    def _close_one(self, sid, limit):
+        if "exit" in self.leg[sid] or self.leg[sid].get("entry", {}).get("status") == "skipped": return
+        self.leg[sid]["exit"] = dict(leg="close", signal_px=np.nan, trigger_px=np.nan, tick_time=None, recv_time=None)
+        lim = None
+        if limit:
+            try: lim = self.broker.limit_up(sid)
+            except Exception: lim = self.w[sid]["lu"]
+        self.cover(sid, lim)
 
     def expire(self, t):
         with self.lock:
@@ -400,8 +439,9 @@ class PaperOrb:
                                  slip_yuan=slip(sig, fpx), slip_ticks=tks(sig, fpx), slip_pct=(slip(sig, fpx) / sig * 100) if (slip(sig, fpx) is not None and sig) else None,
                                  trigger_slip_ticks=tks(sig, trig), exec_slip_ticks=tks(trig, fpx),
                                  tick_size=OL.tick_size(sig) if sig is not None and np.isfinite(sig) else None,
-                                 tick_time=hms(L.get("tick_time")), recv_time=hms(L.get("recv_time")), order_time=hms(L.get("order_time")), fill_time=hms(ft),
+                                 tick_time=hms(L.get("tick_time")), recv_time=hms(L.get("recv_time")), order_time=hms(L.get("order_time")), ack_time=hms(L.get("ack_time")), fill_time=hms(ft),
                                  detect_ms=ms(L.get("recv_time"), L.get("tick_time")), order_ms=ms(L.get("order_time"), L.get("recv_time")),
+                                 ack_ms=ms(L.get("ack_time"), L.get("order_time")), tick_to_order_ms=ms(L.get("order_time"), L.get("tick_time")),
                                  fill_ms=ms(ft, L.get("order_time")), tick_to_fill_ms=ms(ft, L.get("tick_time")),
                                  order_status=L.get("status", ""), filled=bool(fq)))
         return pd.DataFrame(trades), pd.DataFrame(legs)
@@ -424,7 +464,8 @@ def summarize(ds, info, trades, legs, n_watch, mode):
     def mean(s): s = pd.to_numeric(s, errors="coerce").dropna(); return round(float(s.mean()), 3) if len(s) else None
     def med(s): s = pd.to_numeric(s, errors="coerce").dropna(); return round(float(s.median()), 1) if len(s) else None
     t = trades if len(trades) else pd.DataFrame(columns=["sell_px", "buy_px", "status", "exit_leg", "sim_net_pct", "sim_pnl", "ideal_net_pct", "ideal_pnl", "book_net_pct"])
-    g = legs if len(legs) else pd.DataFrame(columns=["leg", "filled", "slip_ticks", "trigger_slip_ticks", "exec_slip_ticks", "detect_ms", "tick_to_fill_ms"])
+    g = legs if len(legs) else pd.DataFrame(columns=["leg", "filled", "slip_ticks", "trigger_slip_ticks", "exec_slip_ticks", "detect_ms", "tick_to_fill_ms", "tick_to_order_ms"])
+    if "tick_to_order_ms" not in g: g = g.assign(tick_to_order_ms=np.nan)
     gf = g[g.filled == True]
     done = t[t.sell_px.notna() & t.buy_px.notna()]
     return dict(date=ds, mode=mode, trade_ok=bool(info.get("trade_ok", False)), reasons="；".join(info.get("reasons", [])),
@@ -435,7 +476,8 @@ def summarize(ds, info, trades, legs, n_watch, mode):
                 entry_slip_ticks=mean(gf[gf.leg == "entry"].slip_ticks), entry_trigger_ticks=mean(gf[gf.leg == "entry"].trigger_slip_ticks),
                 entry_exec_ticks=mean(gf[gf.leg == "entry"].exec_slip_ticks),
                 stop_slip_ticks=mean(gf[gf.leg == "stop"].slip_ticks), close_slip_ticks=mean(gf[gf.leg == "close"].slip_ticks),
-                detect_ms_median=med(g.detect_ms), tick_to_fill_ms_median=med(gf[gf.leg != "close"].tick_to_fill_ms),
+                detect_ms_median=med(g.detect_ms), tick_to_order_ms_median=med(gf[gf.leg != "close"].tick_to_order_ms),
+                tick_to_fill_ms_median=med(gf[gf.leg != "close"].tick_to_fill_ms),
                 sim_avg_net_pct=mean(done.sim_net_pct), ideal_avg_net_pct=mean(t.ideal_net_pct), book_avg_net_pct=mean(t.book_net_pct),
                 sim_pnl=None if not len(done) else round(float(done.sim_pnl.sum())), ideal_pnl=round(float(pd.to_numeric(t.ideal_pnl, errors="coerce").sum())) if len(t) else 0,
                 finished_at=now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -455,29 +497,37 @@ class Pub:
     """paper 狀態上傳 HF db/orb/paper/ (同 orb_live.Publisher 的做法: token 只從環境變數讀, 不印出)."""
     def __init__(self, enabled, min_gap=LIVE_EVERY, event_gap=EVENT_GAP):
         self.enabled, self.min_gap, self.event_gap, self.last, self.api = enabled, min_gap, event_gap, 0.0, None
-        self.pending = False
+        self.pending = False; self._kick = threading.Event(); self._msg = ""
         if enabled:
             tok = os.environ.get("HF_TOKEN")
             if not tok: log("⚠ --publish 但沒有 HF_TOKEN, 只寫本機 paper/"); self.enabled = False
             else:
                 from huggingface_hub import HfApi
                 self.api = HfApi(token=tok)
+                threading.Thread(target=self._uploader, name="hf-upload", daemon=True).start()
+
+    def _uploader(self):
+        """背景上傳 live.json: HF 上傳要數秒, 不可以卡住盤中送單 (11-04 開盤第一批訊號因此延遲 10 秒以上)。"""
+        while True:
+            self._kick.wait(); self._kick.clear()
+            for k in range(3):
+                try:
+                    self.api.upload_file(path_or_fileobj=str(PAPER / "live.json"), path_in_repo=f"{HF_PAPER}/live.json", repo_id=HF_REPO, repo_type="dataset",
+                                         commit_message=self._msg); break
+                except Exception as e: log(f"HF 上傳失敗 ({k + 1}/3): {e}"); time.sleep(3)
 
     def live(self, state, force=False, event=False):
         """force: 階段變化 (一定上傳); event: 有新事件 (最快每 event_gap 秒, 被擋下的會在之後補傳); 其餘每 min_gap 秒。"""
-        PAPER.mkdir(exist_ok=True); p = PAPER / "live.json"
+        PAPER.mkdir(exist_ok=True); p = PAPER / "live.json"; tmp = PAPER / "live.json.tmp"
         state = {**state, "updated_at": now().strftime("%Y-%m-%d %H:%M:%S")}
-        p.write_text(json.dumps(OL._jclean(state), ensure_ascii=False, default=OL._jdefault, allow_nan=False), encoding="utf-8")
+        tmp.write_text(json.dumps(OL._jclean(state), ensure_ascii=False, default=OL._jdefault, allow_nan=False), encoding="utf-8")
+        os.replace(tmp, p)                                   # 原子替換: 背景上傳不會讀到寫一半的檔
         if not self.enabled: return
         self.pending = self.pending or event
         gap = time.time() - self.last
         if not (force or gap >= self.min_gap or (self.pending and gap >= self.event_gap)): return
         self.last = time.time(); self.pending = False
-        for k in range(3):
-            try:
-                self.api.upload_file(path_or_fileobj=str(p), path_in_repo=f"{HF_PAPER}/live.json", repo_id=HF_REPO, repo_type="dataset",
-                                     commit_message=f"orb paper live {state.get('date')} {state.get('phase')}"); return
-            except Exception as e: log(f"HF 上傳失敗 ({k + 1}/3): {e}"); time.sleep(3)
+        self._msg = f"orb paper live {state.get('date')} {state.get('phase')}"; self._kick.set()
 
     def _cumulative(self, name, today_df, ds):
         """下載 HF 上的累計檔, 換掉同一天的列後回傳 CSV bytes; 讀取失敗 (非「檔案不存在」) 回 None, 避免覆蓋掉歷史."""
@@ -580,6 +630,7 @@ def cmd_run(a):
         if api is not None: api.logout()
         return
     if api is None: sys.exit("缺少永豐憑證")
+    po.start()                                          # 訊號 → 並行送單 (不經主迴圈)
     holder["po"] = po; po.ready = True
     state = lambda phase, note="": dict(date=ds, phase=phase, note=note, mkt_gap=info.get("mkt_gap"), n_cand=info["n_cand"], n_watch=len(watch),
                                         slot=book.slot, positions=po.live_rows(), events=[{k: (hms(v) if isinstance(v, datetime) else v) for k, v in e.items()} for e in po.events])
@@ -592,12 +643,12 @@ def cmd_run(a):
         if po.dirty or time.time() - last_push >= 10:
             pub.live(state("監看中"), event=po.dirty); po.dirty = False; last_push = time.time()
     # ---- 13:25 收盤競價回補 ----
-    po.process(0.1); po.sync_deals()
+    po.sync_deals()
     holding = po.close_all(limit=True)
     log(f"13:25 收盤競價回補 {len(holding)} 檔 (漲停價限價): {holding}")
     pub.live(state("等待收盤", f"收盤競價回補 {len(holding)} 檔"), force=True)
     sleep_until(at(*END_T), step=lambda d: (po.process(d), po.reconcile()))
-    po.sync_deals(); po.reconcile()
+    po.stop(); po.sync_deals(); po.reconcile()
     real_closes = {}
     try:
         ids = list(po.book.s); mk = dict(zip(watch.stock_id, watch.market_type))
