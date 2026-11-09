@@ -76,9 +76,9 @@ def main():
     run([sys.executable, "-W", "ignore", str(S / "build_history.py")])
     after = pd.read_parquet(HIST / "days.parquet").date.max()
     import export_live as XL
-    # 2026-11-09: 第一次跑發現 D1 close 與 MIS 收盤價有 29 筆不同 (良維 11-04 D1 203.5 vs MIS 198.5), 哪邊是官方收盤價還在查 (diag_close.yml);
-    # 查清楚前只檢查不改。
-    fixed = set() if a.local else check_closes(tok, False)
+    # 2026-11-09 第一次跑改了 29 筆 (10-28 ~ 11-05); diag_close.yml 對證交所 / 櫃買官方日成交資訊: D1 close 23/23 與官方一致,
+    # 盤後 13:31 抓的 MIS 價 (良維 11-04 198.5 vs 官方 203.5) 才是錯的 → 以 D1 為準自動改正。
+    fixed = set() if a.local else check_closes(tok, not a.no_upload)
     live = live_record(tok, a.local, a.rebuild_live, force=fixed)
     if after <= before:
         print("沒有新的交易日 (分 K 可能還沒更新)。")
