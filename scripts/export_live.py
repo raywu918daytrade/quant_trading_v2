@@ -33,6 +33,9 @@ class LocalSrc:
         self.d = Path(d)
     def dates(self):
         return sorted({p.name[:10] for k in KINDS for p in self.d.glob(f"????-??-??_{k}.csv")})
+    def paper(self, date):
+        p = ROOT / "paper" / f"{date}_trades.csv"
+        return p if p.exists() else None
     def path(self, date, kind):
         p = self.d / f"{date}_{kind}.csv"
         return p if p.exists() else None
@@ -49,6 +52,12 @@ class HFSrc:
             print(f"⚠ HF 列表失敗 ({e}), 當作沒有實盤資料"); fs = []
         pre = f"{HF_PREFIX}/live/"
         self.files = {f[len(pre):].split("/")[-1]: f for f in fs if f.startswith(pre) and f.endswith(".csv")}
+        self.paper_files = {f for f in fs if f.startswith(f"{HF_PREFIX}/paper/") and f.endswith("_trades.csv")}
+    def paper(self, date):
+        f = f"{HF_PREFIX}/paper/{date}_trades.csv"
+        if f not in self.paper_files: return None
+        from huggingface_hub import hf_hub_download
+        return Path(hf_hub_download(HF_REPO, f, repo_type="dataset", token=self.token, force_download=True))
     def dates(self):
         return sorted({n[:10] for n in self.files if n[10:11] == "_" and n[11:-4] in KINDS})
     def path(self, date, kind):
@@ -219,7 +228,8 @@ def compare_day(date, lv, TR, WT, DAYS):
     summ = dict(date=date, live_status=lv["status"], bt_ready=bt_ready, bt_trade_ok=bt_ok, n_live=len(live_rows), n_bt=len(bt_rows), n_both=len(both),
                 n_live_only=sum(r["side"] == "live" for r in rows), n_bt_only=sum(r["side"] == "bt" for r in rows),
                 live_avg=la, bt_avg=ba, live_pnl=lp, bt_pnl=bp if bt_ready else None, diff_pnl=lp - bp if bt_ready else None, diff_avg=round(la - ba, 4) if la is not None and ba is not None else None,
-                both_live_avg=agg(both, "live")[0], both_bt_avg=agg(both, "bt")[0], entry_ticks_avg=round(float(np.mean(tk)), 2) if tk else None, note=note)
+                both_live_avg=agg(both, "live")[0], both_bt_avg=agg(both, "bt")[0], entry_ticks_avg=round(float(np.mean(tk)), 2) if tk else None, note=note,
+                live_by_sid={r["stock_id"]: [r["name"], r["live"]["pnl"]] for r in live_rows if r["live"]["pnl"] is not None})
     events = [{k: (num(v, 2) if k in ("price", "ref") else ("" if v != v else v)) for k, v in e.items()} for e in ev.to_dict("records")]
     excluded = [dict(stock_id=r["stock_id"], name=txt(r.get("name")), reason=txt(r.get("excluded"))) for r in lx.to_dict("records")]
     return summ, dict(date=date, summary=summ, rows=rows, events=events, excluded=excluded)
@@ -252,15 +262,34 @@ def load_history():
     return pd.read_parquet(H / "trades.parquet"), pd.read_parquet(H / "watch.parquet"), pd.read_parquet(H / "days.parquet")
 
 
-def build(src, TR, WT, DAYS, prev=None, rebuild=False):
-    """回傳 (index, {date: detail}). prev = 上次的 live_index.json: 回測已就緒的日子沿用, 不重算 (只重算新日子與回測未就緒的)."""
+def paper_vs_live(summ, paper):
+    """訊號 vs 模擬單只比『兩邊都有做的股票』; 兩邊選到不同股票的部分 (09:05 一次多檔跌破時, MIS 10 秒輪詢與逐筆 tick 排出的先後不同) 另外列。
+    11-04 例: 兩邊各 10 檔只重疊 5 檔, 總差 −27,793 裡約 −19,100 是選股不同, 不是下單造成的。"""
+    lv = summ.get("live_by_sid") or {}
+    sim = {}
+    if paper is not None and len(paper) and "sim_pnl" in paper:
+        d = paper[paper.sell_px.notna() & paper.buy_px.notna() & paper.sim_pnl.notna()]
+        sim = {r.stock_id: [r.name, round(float(r.sim_pnl))] for r in d.itertuples()}
+    both = sorted(set(lv) & set(sim))
+    summ.update(has_paper=paper is not None, n_sim=len(sim), n_sim_both=len(both),
+                sim_pnl=round(sum(v[1] for v in sim.values())) if paper is not None else None,
+                live_both_pnl=round(sum(lv[s][1] for s in both)), sim_both_pnl=round(sum(sim[s][1] for s in both)),
+                live_only=[[s, *lv[s]] for s in lv if s not in sim], sim_only=[[s, *sim[s]] for s in sim if s not in lv])
+    return summ
+
+
+def build(src, TR, WT, DAYS, prev=None, rebuild=False, force=()):
+    """回傳 (index, {date: detail}). prev = 上次的 live_index.json: 回測已就緒的日子沿用, 不重算 (只重算新日子、回測未就緒的、force 指定的、
+    以及舊格式沒有 live_by_sid 的). 模擬單對照每次都重算 (模擬單檔可能事後被 fix_close 改正)."""
     old = {x["date"]: x for x in (prev or {}).get("days", [])} if not rebuild else {}
     days, details = [], {}
+    pp = getattr(src, "paper", lambda d: None)
     for ds in src.dates():
-        if ds in old and old[ds].get("bt_ready"):
-            days.append({k: v for k, v in old[ds].items() if k not in ("cum_live", "cum_bt")}); continue
-        summ, det = compare_day(ds, read_live(src, ds), TR, WT, DAYS)
-        days.append(summ); details[ds] = det
+        if ds in old and old[ds].get("bt_ready") and "live_by_sid" in old[ds] and ds not in force:
+            summ = {k: v for k, v in old[ds].items() if k not in ("cum_live", "cum_bt")}
+        else:
+            summ, det = compare_day(ds, read_live(src, ds), TR, WT, DAYS); details[ds] = det
+        days.append(paper_vs_live(summ, _csv(pp(ds))))
     return build_index(days), details
 
 

@@ -477,6 +477,14 @@ async function loadLive() {
 }
 
 // ----- 歷史 -----
+// 模擬 − 訊號 拆成「同股差」(兩邊都做的股票: 進出場價差 = 下單時間差 + 滑價) 與「選股不同」(只有一邊做的股票);
+// 09:05 多檔同時跌破時, 訊號 (MIS 10 秒輪詢) 與模擬 (逐筆 tick) 排出的「先跌破 10 檔」可能不同 (11-04 只重疊 5 檔)。欄位由 export_live.paper_vs_live 算。
+const lvSplit = (r, p) => {
+  if (!r || !p || p.sim_pnl === null) return null;
+  const all = p.sim_pnl - (r.live_pnl || 0);
+  if (r.sim_both_pnl === undefined || r.sim_pnl === null || r.sim_pnl === undefined) return { all, same: null, pick: null, n: null };
+  return { all, same: r.sim_both_pnl - r.live_both_pnl, pick: (r.sim_pnl - r.sim_both_pnl) - (r.live_pnl - r.live_both_pnl), n: r.n_sim_both };
+};
 async function loadLvIndex() {
   const [ri, pr] = await Promise.all([DS.recIndex().catch(() => ({ stats: {}, days: [] })), DS.paperCSV("summary.csv").catch(() => [])]);
   LVS.rec = {}; (ri.days || []).forEach((d) => LVS.rec[d.date] = d);
@@ -504,6 +512,8 @@ async function loadLvIndex() {
   if (s.n_days) ch.push(["訊號", `${s.n_live} 筆 每筆 ${rpc(s.live_avg)} 累計 ${wanStr(s.live_pnl)}`]);
   if (P.length) ch.push(["模擬成交", `${sum("n_filled", P)} 筆 每筆 ${rpc(wavg("sim_avg_net_pct", "n_filled"))} 累計 ${wanStr(cs)}`]);
   if (both.length) ch.push([`同期 (${both.length} 天) 模擬 vs 訊號`, `${wanStr(bp)} vs ${wanStr(bs)}，差 ${wanStr(bp - bs)}`]);
+  const sp = both.map((d) => lvSplit(d.r, d.p)).filter((x) => x && x.same !== null);
+  if (sp.length) ch.push([`其中 同股差 / 選股不同 (${sp.length} 天)`, `${wanStr(sp.reduce((x, v) => x + v.same, 0))} / ${wanStr(sp.reduce((x, v) => x + v.pick, 0))}`]);
   if (s.n_ready) ch.push([`同期 (${s.n_ready} 天) 訊號 vs 回測`, `${wanStr(s.live_pnl_ready)} vs ${wanStr(s.bt_pnl)}，差 ${wanStr(s.diff_pnl)}`]);
   if (P.length) ch.push(["模擬平均進場差 (vs 區間低)", tk(wavg("entry_slip_ticks", "n_filled")) + " 檔"], ["模擬平均停損差", tk(wavg("stop_slip_ticks", "n_stop")) + " 檔"]);
   if (t2f.length) ch.push(["觸價到成交 (中位)", secs(t2f.reduce((x, d) => x + d.tick_to_fill_ms_median, 0) / t2f.length)]);
@@ -514,12 +524,13 @@ async function loadLvIndex() {
   lvSim.setData(days.filter((d) => d.p).map((d) => ({ time: d.date, value: d.cum_sim / 1e4 })));
   lvBt.setData(days.filter((d) => d.r && d.r.cum_bt !== null).map((d) => ({ time: d.date, value: d.r.cum_bt / 1e4 })));
   lvEq.timeScale().fitContent();
-  $("lvdays").innerHTML = `<table class="dl"><thead><tr><th>日期</th><th>訊號 / 模擬 / 回測筆</th><th>訊號損益</th><th>模擬損益</th><th>模擬 − 訊號</th><th>回測損益</th><th>訊號每筆</th><th>模擬每筆</th><th>備註</th></tr></thead><tbody>` +
+  $("lvdays").innerHTML = `<table class="dl"><thead><tr><th>日期</th><th>訊號 / 模擬 / 回測筆</th><th>訊號損益</th><th>模擬損益</th><th>模擬 − 訊號</th><th title="兩邊都做的股票: 下單時間差 + 滑價">同股差</th><th title="只有一邊做的股票 (先跌破 10 檔排序不同)">選股不同</th><th>回測損益</th><th>訊號每筆</th><th>模擬每筆</th><th>備註</th></tr></thead><tbody>` +
     [...days].reverse().map(({ date, r, p }) => {
       const note = [...new Set([r && r.note, p && !p.trade_ok ? p.reasons : "", p && p.n_skipped ? `模擬不下單 ${p.n_skipped}` : "", p && p.n_unclosed ? `⚠ 未回補 ${p.n_unclosed}` : "", !r ? "沒有訊號紀錄" : "", !p ? "沒有模擬單紀錄" : ""].filter(Boolean))].join("，");
-      const diff = r && p && p.sim_pnl !== null ? p.sim_pnl - (r.live_pnl || 0) : null;
+      const x = lvSplit(r, p), diff = x ? x.all : null;
       return `<tr data-d="${date}" class="${p && p.n_unclosed ? "warn" : p && !p.trade_ok ? "dim" : ""}"><td>${date.slice(5)} (${wd(date)})</td>
         <td>${r ? r.n_live : "–"} / ${p ? p.n_filled ?? 0 : "–"} / ${r && r.bt_ready ? r.n_bt : "–"}</td><td>${yuan(r && r.live_pnl)}</td><td>${yuan(p && p.sim_pnl)}</td><td>${yuan(diff)}</td>
+        <td>${x && x.same !== null ? `${yuan(x.same)} <span class="sub">${x.n}檔</span>` : "–"}</td><td>${yuan(x && x.pick)}</td>
         <td>${yuan(r && r.bt_pnl)}</td><td>${rpc(r && r.live_avg)}</td><td>${rpc(p && p.sim_avg_net_pct)}</td><td>${note}</td></tr>`;
     }).join("") + `</tbody></table>`;
   $("lvdays").querySelectorAll("tbody tr").forEach((el) => el.onclick = () => loadLvDay(el.dataset.d));
@@ -579,7 +590,12 @@ async function loadLvDay(date) {
   ch.push(["訊號", rs ? `${rs.n_live} 筆 ${pct(rs.live_avg)} ${wanStr(rs.live_pnl)}` : "無紀錄"]);
   ch.push(["模擬", pd ? `${pd.n_filled ?? 0} 筆 ${pct(pd.sim_avg_net_pct)} ${wanStr(pd.sim_pnl)}` : "無紀錄"]);
   ch.push(["回測", rs && rs.bt_ready ? `${rs.n_bt} 筆 ${pct(rs.bt_avg)} ${wanStr(rs.bt_pnl)}` : "尚未更新"]);
-  if (rs && pd && pd.sim_pnl !== null) ch.push(["模擬 − 訊號", wanStr(pd.sim_pnl - (rs.live_pnl || 0))]);
+  const xs = lvSplit(rs, pd);
+  if (xs) ch.push(["模擬 − 訊號", wanStr(xs.all) + (xs.same !== null ? `（同股 ${xs.n} 檔 ${wanStr(xs.same)}，選股不同 ${wanStr(xs.pick)}）` : "")]);
+  if (xs && xs.same !== null && (rs.live_only.length || rs.sim_only.length)) {
+    const ls = (a) => a.length ? a.map(([s, n, v]) => `${n} ${wanStr(v)}`).join("、") : "無";
+    ch.push(["只有訊號做", ls(rs.live_only)], ["只有模擬做", ls(rs.sim_only)]);
+  }
   if (eT.length) ch.push(["平均進場差 模擬 vs 訊號", tk(eT.reduce((x, v) => x + v, 0) / eT.length) + " 檔"]);
   if (rs && rs.entry_ticks_avg !== null && rs.entry_ticks_avg !== undefined) ch.push(["平均進場差 訊號 vs 回測", tk(rs.entry_ticks_avg) + " 檔"]);
   if (pd && pd.entry_trigger_ticks !== null) ch.push(["模擬進場差拆解 (vs 區間低)", `觸發 ${tk(pd.entry_trigger_ticks)} + 執行 ${tk(pd.entry_exec_ticks)} 檔`]);

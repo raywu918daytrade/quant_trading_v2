@@ -5,6 +5,7 @@
   2. orb_live.refresh: 最近 6 個月 D1 + 最近 2 個月 M1 + info
   3. build_history.py (增量; 沒有分 K 的日子會停下, 下次再補)
   4. export_web.py 匯出新日子的 days/<date>.json 與 index.json
+  4b. fix_close: 訊號 / 模擬單的收盤回補價對 D1 收盤價, 不一致自動改正 + LINE 通知 (11-04 / 11-05 曾各錯一次)
   5. export_live: 讀 HF db/orb/live/<date>/ 的實盤檔, 與同日回測對齊 → web/live_index.json + web/live/<date>.json (實盤紀錄分頁)
      (回測已就緒的日子沿用上次結果, 只算新日子與回測還沒更新的日子; --rebuild-live 全部重算; --local 時讀本機 signals/)
   6. 一個 commit 上傳 history parquet + 新 JSON 到 HF (沒有新交易日時只上傳實盤紀錄)
@@ -25,13 +26,23 @@ def run(cmd):
     print("$", " ".join(cmd), flush=True); subprocess.run(cmd, check=True, cwd=ROOT)
 
 
-def live_record(tok, local, rebuild):
+def check_closes(tok, upload):
+    """訊號 / 模擬單的收盤回補價 vs D1 官方收盤價, 不一致就改正 (fix_close.py); 回傳要重算實盤紀錄的日期. 失敗不影響其他步驟."""
+    try:
+        import fix_close as FC
+        live, paper, _ = FC.reconcile(tok, upload=upload, line=upload)
+        return live | paper
+    except Exception:
+        print("⚠ 收盤價對帳失敗:"); traceback.print_exc(); return set()
+
+
+def live_record(tok, local, rebuild, force=()):
     """實盤 vs 回測對照; 失敗只印錯誤, 不影響回測的更新與上傳. 回傳寫出的檔案."""
     try:
         import export_live as XL
         src = XL.LocalSrc(ROOT / "signals") if local else XL.HFSrc(tok)
         prev = None if (local or rebuild) else XL.fetch_prev_index(tok)
-        idx, det = XL.build(src, *XL.load_history(), prev=prev, rebuild=rebuild)
+        idx, det = XL.build(src, *XL.load_history(), prev=prev, rebuild=rebuild, force=force)
         s = idx["stats"]
         print(f"實盤紀錄: {s['n_days']} 天 (重算 {len(det)} 天), 實盤 {s['n_live']} 筆, 回測已更新 {s['n_ready']} 天的損益差 {s['diff_pnl']:+,} 元")
         return XL.write(idx, det)
@@ -65,7 +76,8 @@ def main():
     run([sys.executable, "-W", "ignore", str(S / "build_history.py")])
     after = pd.read_parquet(HIST / "days.parquet").date.max()
     import export_live as XL
-    live = live_record(tok, a.local, a.rebuild_live)
+    fixed = set() if a.local else check_closes(tok, not a.no_upload)
+    live = live_record(tok, a.local, a.rebuild_live, force=fixed)
     if after <= before:
         print("沒有新的交易日 (分 K 可能還沒更新)。")
         if live and not a.no_upload:
