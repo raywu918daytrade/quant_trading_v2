@@ -42,7 +42,7 @@ for ym in sorted(hold.date.dt.strftime("%Y_%m").unique()):
     if f not in files: print("沒有", f); continue
     m = pd.read_parquet(hf(f), columns=["stock_id", "date", "close", "high"])
     m["stock_id"] = m.stock_id.astype(str); ts = pd.to_datetime(m.date)
-    m["t"] = ts.dt.hour * 60 + ts.dt.minute - 540; m["d"] = ts.dt.normalize()
+    m["t"] = ts.dt.hour * 60 + ts.dt.minute - 540; m["d"] = ts.dt.normalize(); m = m.drop(columns=["date"])
     h = hold[hold.date.dt.strftime("%Y_%m") == ym][["date", "stock_id"]]
     m = m[(m.t >= 255) & (m.t <= 270)].merge(h, left_on=["d", "stock_id"], right_on=["date", "stock_id"])
     B.append(m[["date", "stock_id", "t", "close", "high"]])
