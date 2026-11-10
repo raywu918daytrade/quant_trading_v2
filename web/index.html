@@ -227,6 +227,10 @@ daily.subscribeCrosshairMove((p) => { const t = timeStr(p.time); const b = t && 
 function legend(t, b) { const c = b.c >= b.o ? "pos" : "neg"; return `${t}　開 ${fmt(b.o)}　高 ${fmt(b.h)}　低 ${fmt(b.l)}　收 <span class="${c}">${fmt(b.c)}</span>　量 ${b.v.toLocaleString()} 張`; }
 
 // ---------- data ----------
+// 人工備註: 系統異常日 (結果不照規則, 看數字要打折)
+const DAY_NOTES = {
+  "2026-11-10": "⚠ 系統異常：09:02 程式出錯中斷，09:07 修好重跑，區間不是開盤 5 分鐘 (偏寬)，結果不照規則",
+};
 async function getJSON(u) { const r = await fetch(u); if (!r.ok) throw new Error(r.status + " " + u); return r.json(); }
 // 資料來源: 本機 (webapp.py 的 /api) 或 靜態 (HF 上 export_web.py 產生的 JSON)。?data=<網址> 可指定靜態資料位置 (測試用)。
 const HF_ORB = "https://huggingface.co/datasets/raywu918daytrade/daytrade/resolve/main/db/orb/";
@@ -433,6 +437,7 @@ async function loadLive() {
   if (m.n_watch !== undefined && m.n_watch !== null) inf.push(`監看 ${m.n_watch}`);
   const slot = (b && b.slot) || (a && a.slot); if (slot) inf.push(`每檔額度 ${Math.round(slot / 1e4)} 萬`);
   if (a && a.realized) inf.push(`訊號已實現 ${a.realized.n} 筆 平均 ${pct(a.realized.avg_pct)} 合計 ${Math.round(a.realized.pnl).toLocaleString()} 元`);
+  if (DAY_NOTES[m.date]) inf.push(DAY_NOTES[m.date]);
   if (a && a.note) inf.push(a.note);
   if (b && b.note && b.note !== (a && a.note)) inf.push("模擬：" + b.note);
   $("liveinfo").textContent = inf.join("　");
@@ -526,7 +531,7 @@ async function loadLvIndex() {
   lvEq.timeScale().fitContent();
   $("lvdays").innerHTML = `<table class="dl"><thead><tr><th>日期</th><th>訊號 / 模擬 / 回測筆</th><th>訊號損益</th><th>模擬損益</th><th>模擬 − 訊號</th><th title="兩邊都做的股票: 下單時間差 + 滑價">同股差</th><th title="只有一邊做的股票 (先跌破 10 檔排序不同)">選股不同</th><th>回測損益</th><th>訊號每筆</th><th>模擬每筆</th><th>備註</th></tr></thead><tbody>` +
     [...days].reverse().map(({ date, r, p }) => {
-      const note = [...new Set([r && r.note, p && !p.trade_ok ? p.reasons : "", p && p.n_skipped ? `模擬不下單 ${p.n_skipped}` : "", p && p.n_unclosed ? `⚠ 未回補 ${p.n_unclosed}` : "", !r ? "沒有訊號紀錄" : "", !p ? "沒有模擬單紀錄" : ""].filter(Boolean))].join("，");
+      const note = [...new Set([DAY_NOTES[date], r && r.note, p && !p.trade_ok ? p.reasons : "", p && p.n_skipped ? `模擬不下單 ${p.n_skipped}` : "", p && p.n_unclosed ? `⚠ 未回補 ${p.n_unclosed}` : "", !r ? "沒有訊號紀錄" : "", !p ? "沒有模擬單紀錄" : ""].filter(Boolean))].join("，");
       const x = lvSplit(r, p), diff = x ? x.all : null;
       return `<tr data-d="${date}" class="${p && p.n_unclosed ? "warn" : p && !p.trade_ok ? "dim" : ""}"><td>${date.slice(5)} (${wd(date)})</td>
         <td>${r ? r.n_live : "–"} / ${p ? p.n_filled ?? 0 : "–"} / ${r && r.bt_ready ? r.n_bt : "–"}</td><td>${yuan(r && r.live_pnl)}</td><td>${yuan(p && p.sim_pnl)}</td><td>${yuan(diff)}</td>
@@ -542,7 +547,7 @@ lvEq.subscribeCrosshairMove((p) => { const t = timeStr(p.time); const d = t && L
 async function loadLvDay(date) {
   LVS.date = date; history.replaceState(null, "", `#live/${date}`);
   $("lvdays").querySelectorAll("tbody tr").forEach((el) => el.classList.toggle("sel", el.dataset.d === date));
-  $("lvtitle").textContent = `${date} (週${wd(date)})`;
+  $("lvtitle").textContent = `${date} (週${wd(date)})` + (DAY_NOTES[date] ? "　" + DAY_NOTES[date] : "");
   const D = LVS.by[date] || {}, pd = D.p;
   const [rj, tr, lg, ev] = await Promise.all([
     D.r ? DS.recDay(date).catch(() => null) : null,
