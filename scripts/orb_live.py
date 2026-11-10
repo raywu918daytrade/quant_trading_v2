@@ -143,7 +143,8 @@ def open_stage(pool, opens, date):
             ex = x[bad].head(5)
             print(f"⚠ D1 昨收與 MIS 昨收 (y) 差 >1%: {mism}/{int(ok.sum())} 檔, 改用 MIS 昨收。例: " +
                   ", ".join(f"{r.stock_id} D1 {r.pc:g} / MIS {r.y:g}" for r in ex.itertuples()))
-        x.loc[ok, "pc"] = x.loc[ok, "y"]
+        x["pc"] = x.pc.astype("float64")      # D1 是 float32, 新版 pandas 塞 float64 的 y 會直接 TypeError (2026-11-10 盤中中斷)
+        x.loc[ok, "pc"] = x.loc[ok, "y"].astype("float64")
         x["limit_up"] = x.pc.map(limit_up); x["force_px"] = x.pc * (1 + P["FORCE"])
     x["gap"] = x.open / x.pc - 1
     mkt_gap = x.gap.mean()
