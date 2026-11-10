@@ -55,8 +55,8 @@ px = bars.pivot_table(index=["date", "stock_id"], columns="t", values="close", a
 px = px.reindex(columns=range(255, 271)).ffill(axis=1)
 hold = hold.merge(px, left_on=["date", "stock_id"], right_index=True, how="left")
 
-lu = hold.pc * 1.10 if "pc" in hold else hold.entry_px * np.nan
-if "lu" in hold: lu = hold.lu
+LU = hold["lu"] if "lu" in hold else (hold["pc"] * 1.10 if "pc" in hold else pd.Series(np.inf, index=hold.index))
+print("漲停價來源:", "lu" if "lu" in hold else "pc" if "pc" in hold else "無 (不檢查)")
 P("# 收盤回補 vs 13:20~13:24 提早平倉")
 P("")
 P(f"對象: 定案規則回測 {hold.date.min().date()} ~ {hold.date.max().date()} 中 13:20 時仍持有的空單 {len(hold)} 筆 (排除 {', '.join(str(d.date()) for d in sorted(EXCL))})。")
@@ -70,7 +70,7 @@ P("| 平倉時間 | 筆數 | 原每筆% | 提早每筆% | 差 (提早−原) %/�
 P("|---|---|---|---|---|---|---|---|---|")
 res = {}
 for t in range(260, 265):
-    p = hold[t]; ok = p.notna() & ~(p >= (hold.pc * 1.1) * 0.999 if "pc" in hold else False)
+    p = hold[t]; ok = p.notna() & ~(p >= LU * 0.999)
     r_alt = np.where(ok, (-(p * (1 + a.slip) / hold.entry_px - 1) - COST) * 100, hold.r_pct)
     d = pd.Series(r_alt - hold.r_pct, index=hold.index); res[t] = d
     e = hold.date < "2024-01-01"
