@@ -300,6 +300,17 @@ live.yml 盤中把訊號推到自己的 LINE (LINE Notify 已於 2025-03 停用,
 - 測試: `LINE_CHANNEL_ACCESS_TOKEN=... LINE_USER_ID=... python3 scripts/orb_live.py line-test` 推一則測試訊息 (成功 exit 0)。本機盤中也可 `run --line`。
 - 失敗處理: 逾時 5 秒、5xx 或逾時重送 1 次 (帶同一把 `X-Line-Retry-Key`, 不會重複推)；4xx 不重送。paper.yml (永豐模擬單) 不推, 避免同一訊號推兩次。
 
+### LINE 架構 (2026-11-11) — 推播 / 選單 / 指令機器人
+LINE 功能分三層, 之後擴充照這個放:
+| 層 | 誰觸發 | 程式 | 額度 |
+|---|---|---|---|
+| 推播 | 程式主動 (進場、停損、提醒、結算、不交易、出錯) | `scripts/orb_live.py` `Line` | 吃每月 push 額度 (免費 200 則) |
+| 選單 | 使用者點聊天室下方選單 (持倉 / 損益 / 狀態 / 網頁) | `line_bot/setup_line.py richmenu` + `richmenu.png` | 不吃 |
+| 指令機器人 | 使用者打字 (持倉、損益、狀態、網頁、說明、四碼代號) | `line_bot/worker.js` (Cloudflare Worker, webhook) | reply 免費 |
+- 機器人只讀已經上傳的 `db/orb/live.json` 與 `db/orb/paper/live.json`, 不碰交易程式；只回應 `LINE_USER_ID`。**加新指令**: 在 `worker.js` 的 `COMMANDS` 加一筆 `{ keys, desc, run(ctx) }` (ctx = { live, paper }), 回傳 `text()` / `withButtons()` 組成的訊息陣列；推上 main 後 `LINE bot deploy` workflow 自動重新部署。改選單: 改 `setup_line.py` 的 `acts` 與重畫 `richmenu.png` (2500×843, 四格)。
+- 手機頁: `web/today.html` (今日持倉 / 損益: 訊號與模擬單、持有中 / 已停損 / 已回補、已實現 + 未實現, 盤中每 20 秒重讀；點股票開 `chart.html`)。
+- **一次性設定**: (1) Cloudflare 免費帳號 → My Profile → API Tokens → Create Token → 範本「Edit Cloudflare Workers」→ 得到 token；帳號首頁右側的 Account ID。(2) GitHub repo Secrets 加 `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID`、`LINE_CHANNEL_SECRET` (LINE Developers → channel → Basic settings → Channel secret)。(3) GitHub → Actions → **LINE bot deploy** → Run workflow: 部署 worker、設 webhook 網址並測試、建立選單。(4) LINE Developers → Messaging API → 打開 **Use webhook**；LINE Official Account Manager → 回應設定 → 關掉「自動回應訊息」(不然每句都會多一則罐頭回覆)。
+
 ### 實盤紀錄 (2026-10-27) — `scripts/export_live.py` + 網頁「實盤紀錄」分頁
 每天把實盤訊號 (live.yml 收盤後上傳的 `db/orb/live/<date>/<date>_{trades,events,watch,excluded,cand}.csv`) 和同日回測 (`orb_history/trades.parquet`) 逐檔對齊。
 實盤放空價 = 偵測到跌破時的最新成交價 (每 10 秒輪詢), 回測 = 區間低 (1 分 K), 兩者差距就是延遲與滑價。

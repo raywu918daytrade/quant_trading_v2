@@ -1,0 +1,5 @@
+# Cloudflare Worker: LINE 指令機器人 (webhook)。部署: GitHub Actions → LINE bot deploy (.github/workflows/line_bot.yml)
+name = "orb-line-bot"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+workers_dev = true

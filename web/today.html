@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>今日持倉</title>
+<style>
+  :root {
+    --surface: #fcfcfb; --panel: #ffffff; --line: #e6e5e0; --line2: #d6d5cf;
+    --ink: #121212; --ink2: #55544f; --ink3: #8a8984;
+    --up: #d33a33; --dn: #1a9e6a; --blue: #1f6fd1; --orange: #e07a00;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--surface); color: var(--ink); font: 14px/1.45 -apple-system, "PingFang TC", "Heiti TC", "Noto Sans TC", sans-serif; padding-bottom: 24px; }
+  header { padding: 12px 16px 4px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  h2 { font-size: 15px; margin: 0 0 6px; font-weight: 600; display: flex; align-items: baseline; gap: 8px; }
+  .sub { color: var(--ink2); font-size: 12.5px; }
+  .phase { font-size: 12px; padding: 1px 8px; border-radius: 10px; background: #eef4fd; color: #1f4f9a; }
+  .phase.off { background: #f1f0ec; color: var(--ink2); }
+  .pos { color: var(--up); } .neg { color: var(--dn); }
+  .tot { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 8px 16px; }
+  .tot > div { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .tot .k { font-size: 12px; color: var(--ink2); } .tot .v { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  section { margin: 10px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .row { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; padding: 8px 0; border-top: 1px solid #f0efea; text-decoration: none; color: inherit; }
+  .row:first-of-type { border-top: 0; }
+  .row .nm { font-weight: 600; } .row .r { text-align: right; font-variant-numeric: tabular-nums; }
+  .row .d { font-size: 12.5px; color: var(--ink2); white-space: nowrap; } .row .big { font-weight: 600; }
+  .tag { font-size: 11.5px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--line2); color: var(--ink2); margin-left: 4px; font-weight: 400; }
+  .tag.hold { border-color: #b9d1f2; color: #1f4f9a; background: #eef4fd; } .tag.stop { border-color: #f1c58f; color: #a35a00; background: #fff6e6; }
+  .empty { color: var(--ink2); padding: 8px 0; }
+  .links { display: flex; flex-wrap: wrap; gap: 8px 16px; padding: 4px 16px; font-size: 13px; } .links a { color: var(--blue); }
+</style>
+</head>
+<body>
+<header><h1>今日持倉 / 損益</h1><span id="phase" class="phase off">載入中</span><span id="upd" class="sub"></span></header>
+<div class="tot" id="tot"></div>
+<section><h2>即時訊號 <span class="sub">只記不下單</span></h2><div id="sig"></div></section>
+<section><h2>永豐模擬單 <span class="sub">模擬環境成交</span></h2><div id="sim"></div></section>
+<div class="links"><a href="index.html#live">即時訊號 vs 模擬單 (完整)</a><a href="index.html">歷史回測</a></div>
+<script>
+// LINE 選單「今日持倉 / 損益」連到這裡。讀 HF 上 orb_live 的 live.json 與 paper_orb 的 paper/live.json, 盤中每 20 秒重讀。
+// 損益 (元) = (放空價 − 參考價) × 張 × 1000 − 成本 0.23% × 放空金額；參考價: 已出場用出場價, 持有中用最新價。
+const $ = (id) => document.getElementById(id);
+const HF = "https://huggingface.co/datasets/raywu918daytrade/daytrade/resolve/main/db/orb/";
+const QS = new URLSearchParams(location.search);
+const LIVE = QS.get("live") || HF + "live.json", PAPER = QS.get("paper") || HF + "paper/live.json";
+const COST = 0.0023, ACTIVE = ["盤前", "等待 09:05", "監看中", "等待收盤", "收盤回補提醒"];
+const ok = (v) => v !== null && v !== undefined && v !== "" && Number.isFinite(+v);
+const fmt = (v, d = 2) => ok(v) ? (+v).toFixed(d) : "–";
+const cls = (v) => v > 0 ? "pos" : v < 0 ? "neg" : "";
+const yuan = (v) => ok(v) ? `<span class="${cls(v)}">${v > 0 ? "+" : ""}${Math.round(v).toLocaleString()}</span>` : "–";
+const pct = (v) => ok(v) ? `<span class="${cls(v)}">${v > 0 ? "+" : ""}${(+v).toFixed(2)}%</span>` : "–";
+const hm = (t) => ok(t) ? (() => { const s = Math.round(t * 60) + 9 * 3600; return `${String(Math.floor(s / 3600)).padStart(2, "0")}:${String(Math.floor(s / 60) % 60).padStart(2, "0")}`; })() : "";
+const get = async (u) => { const r = await fetch(u + (u.includes("?") ? "&" : "?") + "t=" + Date.now()); if (!r.ok) throw new Error(r.status); return r.json(); };
+const pnl = (sell, ref, lots) => ok(sell) && ok(ref) && lots ? (sell - ref) * lots * 1000 - COST * sell * lots * 1000 : null;
+const chartLink = (d, sid) => `chart.html?d=${d}&s=${sid}`;
+
+function rowsSig(j) {
+  const rs = (j.watch || []).filter((r) => ok(r.entry_px));
+  let held = 0, real = 0, unreal = 0;
+  const html = rs.sort((a, b) => (a.state === "SHORT" ? 0 : 1) - (b.state === "SHORT" ? 0 : 1) || a.entry_t - b.entry_t).map((r) => {
+    const hold = r.state === "SHORT", ref = hold ? r.last : r.exit_px, p = pnl(r.entry_px, ref, r.lots);
+    if (hold) { held++; unreal += p || 0; } else real += p || 0;
+    const tag = hold ? '<span class="tag hold">持有中</span>' : r.state === "STOPPED" ? '<span class="tag stop">已停損</span>' : '<span class="tag">已回補</span>';
+    return `<a class="row" href="${chartLink(j.date, r.stock_id)}"><span class="nm">${r.stock_id} ${r.name}${tag}</span><span class="r big">${yuan(p)}</span>
+      <span class="d">${hm(r.entry_t)} 空 ${fmt(r.entry_px)} × ${r.lots} 張　停損 ${fmt(r.rh)}</span><span class="r d">${hold ? "現價" : "出場"} ${fmt(ref)}　${pct(r.pnl_pct)}</span></a>`;
+  }).join("");
+  return { held, real, unreal, n: rs.length, html: html || `<div class="empty">${emptyMsg(j)}</div>` };
+}
+function rowsSim(j) {
+  const rs = (j.positions || []).filter((r) => ok(r.sell_px));
+  let held = 0, real = 0, unreal = 0;
+  const html = rs.map((r) => {
+    const hold = !ok(r.buy_px), ref = hold ? r.last : r.buy_px, p = pnl(+r.sell_px, ref, r.sell_lots);
+    if (hold) { held++; unreal += p || 0; } else real += p || 0;
+    const tag = hold ? '<span class="tag hold">持有中</span>' : r.state === "STOPPED" ? '<span class="tag stop">已停損</span>' : '<span class="tag">已回補</span>';
+    return `<a class="row" href="${chartLink(j.date, r.stock_id)}"><span class="nm">${r.stock_id} ${r.name}${tag}</span><span class="r big">${yuan(p)}</span>
+      <span class="d">券賣 ${fmt(r.sell_px)} × ${r.sell_lots} 張　停損 ${fmt(r.rh)}</span><span class="r d">${hold ? "現價" : "買回"} ${fmt(ref)}　${pct(r.pnl_pct)}</span></a>`;
+  }).join("");
+  return { held, real, unreal, n: rs.length, html: html || `<div class="empty">${emptyMsg(j)}</div>` };
+}
+function emptyMsg(j) {
+  if (!j || !j.phase) return "沒有資料";
+  if (["不交易", "非交易日"].includes(j.phase)) return `今日不交易${j.note ? "：" + j.note : ""}`;
+  if (["盤前", "等待 09:05"].includes(j.phase)) return "還沒開始 (09:05 定區間後監看)";
+  return "目前沒有進場";
+}
+let TIMER = null;
+async function refresh() {
+  const [L, S] = await Promise.all([get(LIVE).catch(() => null), get(PAPER).catch(() => null)]);
+  const today = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10);
+  const j = L || {};
+  $("phase").textContent = (j.date && j.date !== today ? j.date + " " : "") + (j.phase || "無資料");
+  $("phase").className = "phase" + (ACTIVE.includes(j.phase) ? "" : " off");
+  $("upd").textContent = j.updated_at ? `更新 ${j.updated_at.slice(11, 19)}` : "";
+  const a = L ? rowsSig(L) : { held: 0, real: 0, unreal: 0, n: 0, html: '<div class="empty">讀不到 live.json</div>' };
+  const b = S && (!L || S.date === L.date) ? rowsSim(S) : { held: 0, real: 0, unreal: 0, n: 0, html: '<div class="empty">今天還沒有模擬單資料</div>' };
+  $("sig").innerHTML = a.html; $("sim").innerHTML = b.html;
+  $("tot").innerHTML = [["持有中", `${a.held} 檔`], ["訊號 損益", yuan(a.real + a.unreal)], ["模擬 損益", b.n ? yuan(b.real + b.unreal) : "–"]]
+    .map(([k, v]) => `<div><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+  clearTimeout(TIMER); if (ACTIVE.includes(j.phase)) TIMER = setTimeout(refresh, 20000);
+}
+refresh();
+</script>
+</body>
+</html>

@@ -1,0 +1,56 @@
+name: LINE bot deploy
+on:
+  # 部署 LINE 指令機器人 (Cloudflare Worker) + 設 webhook + 建立聊天室下方選單。line_bot/ 有改動時自動跑, 也可手動 Run workflow。
+  # 需要 repo Secrets: CLOUDFLARE_API_TOKEN、CLOUDFLARE_ACCOUNT_ID、LINE_CHANNEL_SECRET (+ 既有的 LINE_CHANNEL_ACCESS_TOKEN、LINE_USER_ID)。
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["line_bot/**", ".github/workflows/line_bot.yml"]
+concurrency:
+  group: line-bot
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+      LINE_CHANNEL_SECRET: ${{ secrets.LINE_CHANNEL_SECRET }}
+      LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check secrets
+        id: chk
+        run: |
+          miss=""; for k in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID LINE_CHANNEL_ACCESS_TOKEN LINE_CHANNEL_SECRET LINE_USER_ID; do [ -z "${!k}" ] && miss="$miss $k"; done
+          if [ -n "$miss" ]; then echo "::warning::還沒設定 repo Secrets:$miss — 先跳過部署 (設好後手動 Run workflow)"; echo "ok=0" >> "$GITHUB_OUTPUT"; else echo "ok=1" >> "$GITHUB_OUTPUT"; fi
+      - name: Deploy worker
+        id: wr
+        if: steps.chk.outputs.ok == '1'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: line_bot
+          secrets: |
+            LINE_CHANNEL_ACCESS_TOKEN
+            LINE_CHANNEL_SECRET
+            LINE_USER_ID
+      - uses: actions/setup-python@v5
+        if: steps.chk.outputs.ok == '1'
+        with:
+          python-version: "3.12"
+      - name: Set webhook + rich menu
+        if: steps.chk.outputs.ok == '1'
+        env:
+          DEPLOY_URL: ${{ steps.wr.outputs.deployment-url }}
+          WR_OUT: ${{ steps.wr.outputs.command-output }}
+        run: |
+          pip install -q requests
+          URL="$DEPLOY_URL"; [ -z "$URL" ] && URL=$(echo "$WR_OUT" | grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' | head -1)
+          [ -z "$URL" ] && { echo "::error::抓不到 worker 網址"; exit 1; }
+          echo "worker: $URL"
+          python3 line_bot/setup_line.py webhook "$URL"
+          python3 line_bot/setup_line.py richmenu
