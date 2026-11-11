@@ -280,6 +280,35 @@ for name, msk in [("多: 進場 > 60 日高 ∩ 跳空 <2%", (C.l_px > C.h60) & 
                   ("多: 上方壓力空間 ≥3% 或無", ~(C.d_res_l < 3)), ("多: 進場 ≤ 20 日高", C.l_px <= C.h20)]:
     P(port(C[msk], "l_r", "l_et", name))
 
+# ===== E. 現行空單: 壓力訊號拿來排優先 / 調部位 (不是硬過濾) =====
+def port_rule(z, flag, reserve=0, w_on=1.0, w_off=1.0, cap=10, name=""):
+    """依進場時間先到先做; 非壓力單只在已進場檔數 < cap−reserve 時才做 (保留 reserve 格給壓力單)。部位: 壓力單 w_on 格、其他 w_off 格。"""
+    z = z.sort_values(["date", "s_et"]); rows = []
+    for dt, gdf in z.groupby("date", sort=False):
+        n = 0
+        for r, f in zip(gdf.s_r.values, gdf[flag].values):
+            if n >= cap: break
+            if not f and n >= cap - reserve: continue
+            rows.append((dt, r, w_on if f else w_off)); n += 1
+    t = pd.DataFrame(rows, columns=["date", "r", "w"])
+    days = pd.Series(sorted(Y.date.unique()))
+    dly = (t.assign(x=t.r * t.w).groupby("date").x.sum() / cap).reindex(days, fill_value=0.0); dly.index = days
+    eq = (1 + dly / 100).cumprod(); mdd = (eq / eq.cummax() - 1).min() * 100
+    e = dly.index <= EXPLORE_END
+    yr = " ".join(f"{dly[dly.index.year == y].mean():.2f}" for y in range(2020, 2027))
+    return f"| {name} | {len(t):,} | {t.r.mean():.3f} | {dly.mean():.3f} | {dly.mean()/dly.std()*np.sqrt(250):.2f} | {mdd:.0f}% | {dly[e].mean():.3f} / {dly[~e].mean():.3f} | {yr} |"
+A = A.assign(f_lvl=A.lvl_in == 1, f_gap=A.o > A.ph, f_any=(A.lvl_in == 1) | (A.o > A.h20))
+nday = A.groupby("date").size()
+P(""); P("## E. 壓力訊號當「優先序 / 部位權重」而不是硬過濾 (現行空單)")
+P(f"同規則不設上限時, 有訊號的日子平均 {nday.mean():.1f} 檔跌破, {(nday > 10).mean()*100:.0f}% 的日子超過 10 檔 (第 11 檔起被丟掉)。")
+P(""); P("| 規則 | 筆數 | 每筆% | 日淨% | Sharpe | MDD | 探索/驗證 日淨% | 2020~2026 日淨% |"); P("|---|---|---|---|---|---|---|---|")
+P(port_rule(A, "f_lvl", 0, name="現行 (先到先做, 10 格)"))
+for fl, lab in [("f_lvl", "區間內有壓力"), ("f_any", "區間內有壓力 或 開盤>20日高")]:
+    for rv in [2, 4, 6]:
+        P(port_rule(A, fl, rv, name=f"保留 {rv} 格給「{lab}」"))
+    P(port_rule(A, fl, 0, 1.5, 0.75, name=f"「{lab}」1.5 格, 其他 0.75 格"))
+    P(port_rule(A, fl, 0, 1.25, 0.75, name=f"「{lab}」1.25 格, 其他 0.75 格"))
+
 Path(a.out).parent.mkdir(parents=True, exist_ok=True)
 Path(a.out).write_text("\n".join(OUT) + "\n", encoding="utf-8")
 print(f"寫入 {a.out} ({time.time()-T0:.0f}s)")
