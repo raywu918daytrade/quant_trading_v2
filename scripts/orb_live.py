@@ -18,7 +18,7 @@
   09:05 ~ 12:00 第一次跌破區間低 → 現沖券賣 (每日最多 10 檔, 先跌破先做)。
   反彈突破區間高 → 市價回補 (停損)；否則 13:25 前掛市價參加 13:30 收盤競價回補。
 """
-import argparse, glob, json, math, subprocess, sys, time
+import argparse, atexit, glob, json, math, os, subprocess, sys, time
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -342,25 +342,39 @@ class Publisher:
             if not tok: print("⚠ --publish 但沒有 HF_TOKEN, 只寫本機 signals/live.json"); self.enabled = False
             else:
                 from huggingface_hub import HfApi
-                self.api = HfApi(token=tok)
+                import threading
+                self.api = HfApi(token=tok); self._kick = threading.Event(); self._idle = threading.Event(); self._idle.set(); self._msg = ""
+                threading.Thread(target=self._uploader, name="hf-upload", daemon=True).start()
+                atexit.register(self.flush)                  # 不交易 / 非交易日直接 return 時, 也要等最後一次上傳做完
+    def _uploader(self):
+        """背景上傳 live.json。HF 上傳 / 429 重試會卡好幾秒, 不能擋住輪詢:
+        2026-11-11 09:05 名單出來後 74 秒才第一次輪詢 (09:06:14), 10 檔一次用當日最低價判定跌破, 跟逐筆 tick 的先後順序完全不同。"""
+        while True:
+            self._kick.wait(); self._kick.clear(); self._idle.clear()
+            for k in range(3):
+                try:
+                    self.api.upload_file(path_or_fileobj=str(SIG / "live.json"), path_in_repo=f"{HF_PREFIX}/live.json", repo_id=HF_REPO, repo_type="dataset",
+                                         commit_message=self._msg); break
+                except Exception as e:
+                    print(f"HF 上傳失敗 ({k + 1}/3): {e}"); time.sleep(5)
+            if not self._kick.is_set(): self._idle.set()
     def push(self, state, force=False, event=False):
         state = {**state, "updated_at": now_tw().strftime("%Y-%m-%d %H:%M:%S")}
-        SIG.mkdir(exist_ok=True); p = SIG / "live.json"
-        p.write_text(json.dumps(_jclean(state), ensure_ascii=False, default=_jdefault, allow_nan=False), encoding="utf-8")
+        SIG.mkdir(exist_ok=True); p = SIG / "live.json"; tmp = SIG / "live.json.tmp"
+        tmp.write_text(json.dumps(_jclean(state), ensure_ascii=False, default=_jdefault, allow_nan=False), encoding="utf-8")
+        os.replace(tmp, p)                                   # 原子替換: 背景上傳不會讀到寫一半的檔
         if not self.enabled: return
         self.pending = self.pending or event
         gap = time.time() - self.last
         if not (force or gap >= self.min_gap or (self.pending and gap >= self.event_gap)): return
         self.last = time.time(); self.pending = False      # 失敗也算一次, 避免 429 時每輪重試把額度用光
-        for k in range(3):
-            try:
-                self.api.upload_file(path_or_fileobj=str(p), path_in_repo=f"{HF_PREFIX}/live.json", repo_id=HF_REPO, repo_type="dataset",
-                                     commit_message=f"orb live {state.get('date')} {state.get('phase')}")
-                return
-            except Exception as e:
-                print(f"HF 上傳失敗 ({k + 1}/3): {e}"); time.sleep(5)
+        self._msg = f"orb live {state.get('date')} {state.get('phase')}"; self._idle.clear(); self._kick.set()
+    def flush(self, timeout=60):
+        """等背景上傳做完 (收盤結算 / 程式結束前)."""
+        if self.enabled: self._idle.wait(timeout)
     def upload_day(self, ds):
         if not self.enabled: return
+        self.flush()
         from huggingface_hub import CommitOperationAdd
         files = sorted(f for f in SIG.glob(f"{ds}_*") if f.is_file())
         if not files: return
@@ -383,6 +397,23 @@ class Line:
         self.enabled = enabled; self.tok = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN"); self.to = os.environ.get("LINE_USER_ID")
         if enabled and not (self.tok and self.to):
             print("⚠ --line 但沒有 LINE_CHANNEL_ACCESS_TOKEN / LINE_USER_ID, 不推播"); self.enabled = False
+    def push_async(self, msg):
+        """盤中用: 丟給背景執行緒依序送出, 不擋輪詢 (LINE 逾時 5 秒 × 重送)。結束前呼叫 flush()。"""
+        if not self.enabled: return
+        if not hasattr(self, "_q"):
+            import queue, threading
+            self._q = queue.Queue()
+            def work():
+                while True:
+                    m = self._q.get()
+                    try: self.push(m)
+                    except Exception as e: print("⚠ LINE 推播失敗:", e)
+                    finally: self._q.task_done()
+            threading.Thread(target=work, name="line", daemon=True).start()
+            atexit.register(self.flush)
+        self._q.put(msg)
+    def flush(self):
+        if hasattr(self, "_q"): self._q.join()
     def push(self, msg):
         """msg = line_card.card(...) 組好的 Flex 卡片, 或純文字 (自動轉成卡片: 第一行標題)。
         LINE 拒收 Flex (400) 時改送 altText 純文字, 確保訊息一定送得到。"""
@@ -634,7 +665,7 @@ def cmd_run(a):
     line = Line(a.line)
     try: _run(a, line)
     except (Exception, KeyboardInterrupt) as e:
-        line.push(card_error("orb_live", f"{type(e).__name__}: {str(e)[:300]}"))
+        line.flush(); line.push(card_error("orb_live", f"{type(e).__name__}: {str(e)[:300]}"))
         raise
 
 def _run(a, line):
@@ -704,14 +735,14 @@ def _run(a, line):
             m["h"] = np.nanmax([m["h"], r.h]); m["l"] = np.nanmin([m["l"], r.l]); m["z"] = last
             book.bars.add(r.stock_id, t, r.z, r.v)
         sig = [e for e in new_ev if e["event"] in ("SHORT", "STOP")]
-        if sig: line.push(card_events(sig, book, ds))                 # 先推 LINE 再上傳 HF (HF 重試可能卡十幾秒)
+        if sig: line.push_async(card_events(sig, book, ds))           # 背景送, 不擋下一輪輪詢
         for sid in ids:                                    # 12:00 後 WAIT 失效
             if book.s[sid]["state"] == "WAIT" and t >= P["DEADLINE"] + 1: book.s[sid]["state"] = "EXPIRED"
         holding = [s for s, p in book.s.items() if p["state"] == "SHORT"]
         if not reminded and t >= 264 and holding:           # 13:24
             print(f"⏰ 13:24 提醒: 持有 {len(holding)} 檔 {holding}, 13:25 前掛市價買回參加收盤競價"); reminded = True
             if a.notify: notify("收盤回補提醒", f"{len(holding)} 檔: {' '.join(holding)}")
-            line.push(card_reminder(holding, book, mem, ds))
+            line.push_async(card_reminder(holding, book, mem, ds))
             pub.push(live_state(ds, "收盤回補提醒", info, book, mem, excl, note=f"13:25 前掛市價買回 {len(holding)} 檔"), force=True)
         pub.push(live_state(ds, "監看中", info, book, mem, excl), event=bool(new_ev)); new_ev.clear()
         if not book.active() or (not holding and t >= P["DEADLINE"] + 1): break
@@ -727,7 +758,7 @@ def _run(a, line):
     evf.close()
     summarize(book.trades(), ds, SIG, info)
     tr = book.trades()
-    line.push(card_summary(tr, ds, info))
+    line.flush(); line.push(card_summary(tr, ds, info))
     st = live_state(ds, "已結算", info, book, mem, excl)
     (SIG / f"{ds}_chart.json").write_text(json.dumps(_jclean(st), ensure_ascii=False, default=_jdefault), encoding="utf-8")   # 隨 upload_day 上傳, chart.html 看歷史日用
     pub.push(st, force=True); pub.upload_day(ds)
