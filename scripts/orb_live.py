@@ -382,18 +382,41 @@ class Line:
         self.enabled = enabled; self.tok = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN"); self.to = os.environ.get("LINE_USER_ID")
         if enabled and not (self.tok and self.to):
             print("⚠ --line 但沒有 LINE_CHANNEL_ACCESS_TOKEN / LINE_USER_ID, 不推播"); self.enabled = False
-    def push(self, text):
+    def push(self, text, stocks=None, links=None):
+        """stocks = [(代號, 名稱, 市場)]: 訊息下方加「📈 代號 名稱」按鈕, 點了開 Yahoo 股市走勢圖; links = [(標籤, 網址)] 額外按鈕。
+        有按鈕時送 Flex 訊息 (仍算 1 則); LINE 拒收 Flex (400) 時改送純文字 + 網址, 確保訊息一定送得到。"""
         if not self.enabled: return False
+        btns = [(f"📈 {sid} {name}", chart_url(sid, mkt)) for sid, name, mkt in dict.fromkeys(stocks or [])] + list(links or [])
+        if btns:
+            r = self._post([line_flex(text, btns)])
+            if r is not None: return r
+            text = text + "\n" + "\n".join(f"{lb} {u}" for lb, u in btns)
+        return bool(self._post([{"type": "text", "text": text[:5000]}]))
+    def _post(self, messages):
+        """True = 送達; False = 失敗; None = 400 (訊息格式被拒, 呼叫端可改送純文字)。"""
         import requests, uuid
         hdr = {"Authorization": f"Bearer {self.tok}", "X-Line-Retry-Key": str(uuid.uuid4())}   # 同一把 retry key 重送不會重複推 (已送達回 409)
         for k in range(2):
             try:
-                r = requests.post(self.URL, headers=hdr, json={"to": self.to, "messages": [{"type": "text", "text": text[:5000]}]}, timeout=5)
+                r = requests.post(self.URL, headers=hdr, json={"to": self.to, "messages": messages}, timeout=5)
                 if r.status_code in (200, 409): return True
                 print(f"⚠ LINE 推播失敗 {r.status_code}: {r.text[:200]}")
+                if r.status_code == 400 and messages[0].get("type") == "flex": return None
                 if r.status_code < 500: return False                # 4xx (token 錯 / 額度用完 429) 重送也沒用
             except Exception as e: print(f"⚠ LINE 推播失敗 ({k + 1}/2): {e}")
         return False
+
+SITE = "https://fade.just1stock.com"
+def chart_url(sid, market):
+    """Yahoo 股市個股頁 (盤中即時走勢圖 + K 線), 手機 LINE 內建瀏覽器可直接開。上市 .TW / 上櫃 .TWO。"""
+    return f"https://tw.stock.yahoo.com/quote/{sid}.{'TWO' if str(market).lower() in ('tpex', 'otc') else 'TW'}"
+
+def line_flex(text, btns):
+    """文字 + 一排連結按鈕的 Flex bubble。altText 是通知列預覽 (上限 400 字)。按鈕標籤上限 40 字。"""
+    return {"type": "flex", "altText": text[:400], "contents": {"type": "bubble", "size": "mega",
+            "body": {"type": "box", "layout": "vertical", "contents": [{"type": "text", "text": text[:2000], "wrap": True, "size": "sm"}]},
+            "footer": {"type": "box", "layout": "vertical", "spacing": "none", "contents": [
+                {"type": "button", "style": "link", "height": "sm", "action": {"type": "uri", "label": lb[:40], "uri": u}} for lb, u in btns[:12]]}}}
 
 def line_events(evs):
     return "\n".join(f"{'🔻' if e['event'] == 'SHORT' else '🛑'} {e['time'][:5]} {e['event']} {e['stock_id']} {e['name']} @ {e['price']:.2f}\n{e['note']}" for e in evs)
@@ -612,14 +635,15 @@ def _run(a, line):
                 book.step(t, r.stock_id, lo if np.isfinite(lo) else np.inf, hi if np.isfinite(hi) else -np.inf, last, last)
             m["h"] = np.nanmax([m["h"], r.h]); m["l"] = np.nanmin([m["l"], r.l]); m["z"] = last
         sig = [e for e in new_ev if e["event"] in ("SHORT", "STOP")]
-        if sig: line.push(line_events(sig))                 # 先推 LINE 再上傳 HF (HF 重試可能卡十幾秒)
+        if sig: line.push(line_events(sig), stocks=[(e["stock_id"], e["name"], mk[e["stock_id"]]) for e in sig])                 # 先推 LINE 再上傳 HF (HF 重試可能卡十幾秒)
         for sid in ids:                                    # 12:00 後 WAIT 失效
             if book.s[sid]["state"] == "WAIT" and t >= P["DEADLINE"] + 1: book.s[sid]["state"] = "EXPIRED"
         holding = [s for s, p in book.s.items() if p["state"] == "SHORT"]
         if not reminded and t >= 264 and holding:           # 13:24
             print(f"⏰ 13:24 提醒: 持有 {len(holding)} 檔 {holding}, 13:25 前掛市價買回參加收盤競價"); reminded = True
             if a.notify: notify("收盤回補提醒", f"{len(holding)} 檔: {' '.join(holding)}")
-            line.push(f"⏰ 收盤回補提醒: 持有 {len(holding)} 檔, 13:25 前掛市價買回\n" + "\n".join(f"{s} {book.s[s]['name']} {book.s[s]['lots']} 張" for s in holding))
+            line.push(f"⏰ 收盤回補提醒: 持有 {len(holding)} 檔, 13:25 前掛市價買回\n" + "\n".join(f"{s} {book.s[s]['name']} {book.s[s]['lots']} 張" for s in holding),
+                      stocks=[(s, book.s[s]["name"], mk[s]) for s in holding])
             pub.push(live_state(ds, "收盤回補提醒", info, book, mem, excl, note=f"13:25 前掛市價買回 {len(holding)} 檔"), force=True)
         pub.push(live_state(ds, "監看中", info, book, mem, excl), event=bool(new_ev)); new_ev.clear()
         if not book.active() or (not holding and t >= P["DEADLINE"] + 1): break
@@ -633,11 +657,14 @@ def _run(a, line):
         book.close_all({s: fin.get(s, mem[s]["z"]) for s in holding})
     evf.close()
     summarize(book.trades(), ds, SIG, info)
-    line.push(line_summary(book.trades(), ds, info))
+    tr = book.trades()
+    line.push(line_summary(tr, ds, info), stocks=[(r.stock_id, r.name, mk[r.stock_id]) for r in tr.itertuples()] if len(tr) else None,
+              links=[("🌐 今日訊號頁", f"{SITE}/#live/{ds}")])
     pub.push(live_state(ds, "已結算", info, book, mem, excl), force=True); pub.upload_day(ds)
 
 def cmd_line_test(a):
-    ok = Line(True).push(a.text or f"✅ orb_live LINE 測試 {now_tw():%Y-%m-%d %H:%M:%S}")
+    ok = Line(True).push(a.text or f"✅ orb_live LINE 測試 {now_tw():%Y-%m-%d %H:%M:%S}\n點下面按鈕應該會開 Yahoo 股市走勢圖",
+                         stocks=None if a.text else [("2330", "台積電", "twse"), ("6488", "環球晶", "tpex")])
     print("LINE 推播成功" if ok else "LINE 推播失敗"); sys.exit(0 if ok else 1)
 
 def cmd_replay(a):
