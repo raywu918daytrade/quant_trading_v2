@@ -746,7 +746,9 @@ def _run(a, line):
             pub.push(live_state(ds, "收盤回補提醒", info, book, mem, excl, note=f"13:25 前掛市價買回 {len(holding)} 檔"), force=True)
         pub.push(live_state(ds, "監看中", info, book, mem, excl), event=bool(new_ev)); new_ev.clear()
         if not book.active() or (not holding and t >= P["DEADLINE"] + 1): break
-        time.sleep(max(a.poll - (time.time() - loop_start), 1))
+        took = time.time() - loop_start
+        if took > 3 * a.poll: print(f"⚠ {now_tw():%H:%M:%S} 這輪輪詢花了 {took:.0f} 秒 (設定 {a.poll:g} 秒)")   # 11-11 曾因同步上傳 HF 每 2 分鐘卡住一次
+        time.sleep(max(a.poll - took, 1))
     # ---- 收盤結算 ----
     holding = [s for s, p in book.s.items() if p["state"] == "SHORT"]
     if holding:
