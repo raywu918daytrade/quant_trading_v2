@@ -3,3 +3,4 @@ name = "orb-line-bot"
 main = "worker.js"
 compatibility_date = "2026-10-01"
 workers_dev = true
+account_id = "3b43e89a39199fdbf13c0fa4fe4bf93a"   # Ray 的 Cloudflare 帳號 (不是機密)
