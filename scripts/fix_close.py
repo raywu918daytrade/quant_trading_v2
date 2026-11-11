@@ -160,7 +160,9 @@ def reconcile(tok, upload=True, line=False):
     if log and upload:
         n = repo.commit(f"orb fix close prices vs D1 ({len(log)} legs)"); print(f"已改正並上傳 {n} 個檔")
     if log and line:
-        try: OL.Line(True).push("⚠ 收盤價對帳 (以日K收盤價為準) 已自動改正:\n" + "\n".join(log[:15]) + (f"\n…共 {len(log)} 筆" if len(log) > 15 else ""))
+        try: OL.Line(True).push(OL.LC.card("⚠ 收盤價已自動改正", [OL.LC.note("\n".join(log[:15]) + (f"\n…共 {len(log)} 筆" if len(log) > 15 else "")),
+                                       OL.LC.small("以日K收盤價為準, 網頁與紀錄已一併更新")], hint=f"{len(log)} 筆", kind="warn",
+                                       alt=f"⚠ 收盤價對帳已自動改正 {len(log)} 筆: " + "；".join(log[:5])))
         except Exception as e: print("LINE 推播失敗:", e)
     return live, paper, log
 

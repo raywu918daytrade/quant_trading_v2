@@ -26,6 +26,7 @@ import numpy as np, pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import ROOT, RAW, PROC, COST, HF_REPO, HF_PREFIX, HF_BASE
+import line_card as LC
 
 TZ = ZoneInfo("Asia/Taipei")
 LIVE = ROOT / "data" / "live"
@@ -382,16 +383,14 @@ class Line:
         self.enabled = enabled; self.tok = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN"); self.to = os.environ.get("LINE_USER_ID")
         if enabled and not (self.tok and self.to):
             print("⚠ --line 但沒有 LINE_CHANNEL_ACCESS_TOKEN / LINE_USER_ID, 不推播"); self.enabled = False
-    def push(self, text, stocks=None, links=None):
-        """stocks = [(代號, 名稱, 市場)]: 訊息下方加「📈 代號 名稱」按鈕, 點了開 Yahoo 股市走勢圖; links = [(標籤, 網址)] 額外按鈕。
-        有按鈕時送 Flex 訊息 (仍算 1 則); LINE 拒收 Flex (400) 時改送純文字 + 網址, 確保訊息一定送得到。"""
+    def push(self, msg):
+        """msg = line_card.card(...) 組好的 Flex 卡片, 或純文字 (自動轉成卡片: 第一行標題)。
+        LINE 拒收 Flex (400) 時改送 altText 純文字, 確保訊息一定送得到。"""
         if not self.enabled: return False
-        btns = [(f"📈 {x[0]} {x[1]} K線", chart_url(x[0], x[2], *x[3:])) for x in dict.fromkeys(stocks or [])] + list(links or [])
-        if btns:
-            r = self._post([line_flex(text, btns)])
-            if r is not None: return r
-            text = text + "\n" + "\n".join(f"{lb} {u}" for lb, u in btns)
-        return bool(self._post([{"type": "text", "text": text[:5000]}]))
+        if isinstance(msg, str): msg = LC.from_text(msg, kind="error" if msg.startswith("❌") else "info")
+        r = self._post([msg])
+        if r is not None: return r
+        return bool(self._post([{"type": "text", "text": msg.get("altText", "")[:5000] or "(LINE 卡片格式錯誤)"}]))
     def _post(self, messages):
         """True = 送達; False = 失敗; None = 400 (訊息格式被拒, 呼叫端可改送純文字)。"""
         import requests, uuid
@@ -407,26 +406,76 @@ class Line:
         return False
 
 SITE = "https://fade.just1stock.com"
-def chart_url(sid, market, ds=None):
+def chart_url(sid, ds=None):
     """自己的 K 線頁 web/chart.html: 盤中 1 分 K + 區間低 (進場) / 區間高 (停損) 線 + 進場 / 出場標記; 頁內另有 Yahoo 股市連結。"""
-    return f"{SITE}/web/chart.html?d={ds or now_tw().strftime('%Y-%m-%d')}&s={sid}"
+    return LC.chart_url(ds or now_tw().strftime('%Y-%m-%d'), sid)
 
-def line_flex(text, btns):
-    """文字 + 一排連結按鈕的 Flex bubble。altText 是通知列預覽 (上限 400 字)。按鈕標籤上限 40 字。"""
-    return {"type": "flex", "altText": text[:400], "contents": {"type": "bubble", "size": "mega",
-            "body": {"type": "box", "layout": "vertical", "contents": [{"type": "text", "text": text[:2000], "wrap": True, "size": "sm"}]},
-            "footer": {"type": "box", "layout": "vertical", "spacing": "none", "contents": [
-                {"type": "button", "style": "link", "height": "sm", "action": {"type": "uri", "label": lb[:40], "uri": u}} for lb, u in btns[:12]]}}}
+# ---- LINE 卡片 (樣式在 line_card.py, 和 LINE bot 回覆同一套) ----
+def _hm(t):
+    """策略時間 (09:00 起算分鐘) → HH:MM。"""
+    return f"{9 + int(t) // 60:02d}:{int(t) % 60:02d}" if LC.ok(t) else ""
 
-def line_events(evs):
-    return "\n".join(f"{'🔻' if e['event'] == 'SHORT' else '🛑'} {e['time'][:5]} {e['event']} {e['stock_id']} {e['name']} @ {e['price']:.2f}\n{e['note']}" for e in evs)
+def card_events(evs, book, ds):
+    """一次輪詢的 SHORT / STOP 事件 → 一張卡片 (每檔一行, 點了開 K 線)。"""
+    rows = []
+    for e in evs:
+        p = book.s.get(e["stock_id"], {})
+        if e["event"] == "SHORT":
+            sub = f"{e['time'][:5]} 跌破 {LC.f2(p.get('rl'))} · 券賣 {p.get('lots', '–')} 張 · 停損 {LC.f2(p.get('rh'))}"
+            rows.append(LC.row(f"🔻 {e['stock_id']} {e['name']}", sub, LC.f2(e["price"]), "空", LC.INK, chart_url(e["stock_id"], ds)))
+        else:
+            r = -(e["price"] / p["entry_px"] - 1) * 100 if LC.ok(p.get("entry_px")) else None
+            sub = f"{e['time'][:5]} 突破 {LC.f2(p.get('rh'))} · 市價回補 {p.get('lots', '–')} 張 · 空 {LC.f2(p.get('entry_px'))}"
+            rows.append(LC.row(f"🛑 {e['stock_id']} {e['name']}", sub, LC.f2(e["price"]), LC.pct(r), LC.color(r), chart_url(e["stock_id"], ds)))
+    ns, nx = sum(e["event"] == "SHORT" for e in evs), sum(e["event"] != "SHORT" for e in evs)
+    title = "🔻 進場訊號" if ns and not nx else "🛑 停損回補" if nx and not ns else "🔔 進場 / 停損"
+    alt = "；".join(f"{'空' if e['event'] == 'SHORT' else '停損'} {e['stock_id']}{e['name']} {LC.f2(e['price'])}" for e in evs)
+    return LC.card(title, rows + [LC.small("點股票看 K 線 (進場線 / 停損線)")], sub=f"{ds} {evs[0]['time'][:5]} · 只記訊號, 自行下單",
+                   kind="entry" if ns else "stop", hint=f"{len(evs)} 檔", alt=f"{title} {alt}")
 
-def line_summary(tr, date, info):
-    lines = [f"📊 {date} 結算", f"大盤跳空 {info.get('mkt_gap', np.nan)*100:+.2f}%  監看 {info.get('n_watch', 0)}  進場 {len(tr)}"]
+def card_reminder(holding, book, mem, ds):
+    rows, tot = [], 0
+    for s in holding:
+        p = book.s[s]; z = mem.get(s, {}).get("z")
+        r = -(z / p["entry_px"] - 1) * 100 if LC.ok(z) and LC.ok(p["entry_px"]) else None
+        y = (p["entry_px"] - z) * p["lots"] * 1000 - COST * p["entry_px"] * p["lots"] * 1000 if r is not None else None
+        tot += y or 0
+        rows.append(LC.row(f"{s} {p['name']}", f"空 {LC.f2(p['entry_px'])} × {p['lots']} 張 · 現價 {LC.f2(z)}", LC.yuan(y), LC.pct(r), LC.color(y), chart_url(s, ds)))
+    return LC.card("⏰ 收盤回補提醒", [LC.tiles(LC.tile("持有中", f"{len(holding)} 檔"), LC.tile("未實現", LC.yuan(tot), "含成本", LC.color(tot))), LC.sep(), *rows,
+                   LC.small("13:25 前掛市價買回, 參加收盤競價")], sub=f"{ds} 13:24", kind="warn",
+                   alt=f"⏰ 收盤回補提醒: 持有 {len(holding)} 檔 " + " ".join(holding) + ", 13:25 前掛市價買回")
+
+def card_summary(tr, ds, info):
+    blocks = []
     if len(tr):
-        lines += [f"{r.stock_id} {r.name} {r.r_pct:+.2f}% {'停損' if r.reason.startswith('停損') else '收盤'} {r.pnl:+,.0f}" for r in tr.itertuples()]
-        lines.append(f"平均每筆 {tr.r_pct.mean():+.2f}%  勝率 {(tr.r_pct > 0).mean()*100:.0f}%  合計 {tr.pnl.sum():+,.0f} 元")
-    return "\n".join(lines)
+        tot = tr.pnl.sum(); win = (tr.r_pct > 0).mean() * 100; avg = tr.r_pct.mean()
+        blocks += [LC.tiles(LC.tile("合計損益", LC.yuan(tot), "元, 含成本", LC.color(tot)), LC.tile("勝率", f"{win:.0f}%", f"{len(tr)} 筆"),
+                            LC.tile("平均", LC.pct(avg), "每筆", LC.color(avg))), LC.sep()]
+        for r in tr.itertuples():
+            how = "停損" if r.reason.startswith("停損") else "收盤"
+            blocks.append(LC.row(f"{r.stock_id} {r.name}", f"{_hm(r.entry_t)} 空 {LC.f2(r.entry_px)} → {how} {LC.f2(r.exit_px)} · {r.lots} 張",
+                                 LC.yuan(r.pnl), LC.pct(r.r_pct), LC.color(r.pnl), chart_url(r.stock_id, ds)))
+        blocks.append(LC.sep())
+    else:
+        blocks.append(LC.note("今天沒有進場 (沒有跌破區間低的股票)"))
+    blocks += [LC.kv("大盤平均跳空", LC.pct(info["mkt_gap"] * 100) if LC.ok(info.get("mkt_gap")) else "–"), LC.kv("監看 / 進場", f"{info.get('n_watch', 0)} / {len(tr)} 檔")]
+    alt = f"📊 {ds} 結算: 進場 {len(tr)} 檔" + (f", 合計 {LC.yuan(tr.pnl.sum())} 元" if len(tr) else "")
+    return LC.card("📊 今日結算", blocks, sub=ds, kind="sum", hint="訊號 (不下單)", footer=("🌐 今日訊號頁", f"{SITE}/#live/{ds}"), alt=alt)
+
+def card_notrade(ds, title, reasons, info=None, n_cand=None, extra=""):
+    """不交易 / 休市 / 週一: 每天都有一則, 才知道系統是活的。"""
+    blocks = [LC.kv("原因", "；".join(reasons))]
+    if info:
+        blocks += [LC.kv("大盤平均跳空", LC.pct(info["mkt_gap"] * 100), LC.color(info["mkt_gap"])), LC.kv("上漲家數比", f"{info['breadth']*100:.0f}%")]
+    if n_cand is not None: blocks.append(LC.kv("跳空 ≥2% 候選", f"{n_cand} 檔"))
+    if extra: blocks.append(LC.small(extra))
+    blocks.append(LC.small("✅ 系統正常運作"))
+    return LC.card(title, blocks, sub=ds, kind="info", alt=f"{title} {ds}: " + "；".join(reasons) + " (系統正常運作)")
+
+def card_error(where, err, run_name="Live signals"):
+    return LC.card("❌ 程式出錯中斷", [LC.kv("時間", f"{now_tw():%Y-%m-%d %H:%M:%S}"), LC.kv("程式", where), LC.note(err[:500]),
+                   LC.small(f"GitHub → Actions → {run_name} 看 log")], kind="error",
+                   footer=("🔧 GitHub Actions", "https://github.com/raywu918daytrade/quant_trading_v2/actions"), alt=f"❌ {where} 出錯中斷: {err[:300]}")
 
 def _jclean(o):
     """遞迴把 NaN / inf 轉成 None、numpy 型別轉成 Python 型別 (標準 JSON 不接受 NaN)."""
@@ -586,7 +635,7 @@ def cmd_run(a):
     line = Line(a.line)
     try: _run(a, line)
     except (Exception, KeyboardInterrupt) as e:
-        line.push(f"❌ {now_tw():%Y-%m-%d %H:%M:%S} orb_live 出錯中斷\n{type(e).__name__}: {str(e)[:300]}\n(GitHub → Actions → Live signals 看 log)")
+        line.push(card_error("orb_live", f"{type(e).__name__}: {str(e)[:300]}"))
         raise
 
 def _run(a, line):
@@ -597,7 +646,7 @@ def _run(a, line):
     pub.push(live_state(ds, "盤前", note=f"盤前池 {int(pool.in_pool.sum())} 檔 (D1 最後 {last.date()})"), force=True)
     if today.dayofweek in P["NO_DOW"] and not a.force:
         print("今天週一, 規則不交易 (加 --force 仍可跑完, 僅供觀察)。")
-        line.push(f"😴 {ds} 週一, 規則不交易 (系統正常運作)")
+        line.push(card_notrade(ds, "😴 今日不交易", ["週一, 規則不交易"]))
         pub.push(live_state(ds, "不交易", note="週一不交易"), force=True); return
     elig = None if a.no_eligibility else fetch_eligible(ds)
     mis = MIS()
@@ -607,14 +656,13 @@ def _run(a, line):
     mis_day = snap.mis_d.dropna().mode()
     if len(mis_day) == 0 or mis_day.iloc[0] != today.strftime("%Y%m%d"):
         msg = f"MIS 回傳日期 {mis_day.iloc[0] if len(mis_day) else '無'} ≠ 今天, 可能非交易日或尚未開盤"
-        print(msg + ", 結束。"); line.push(f"😴 {ds} 非交易日 / 休市, 不交易 (系統正常運作)\n{msg}"); pub.push(live_state(ds, "非交易日", note=msg), force=True); sys.exit(0 if a.publish else 2)
+        print(msg + ", 結束。"); line.push(card_notrade(ds, "😴 休市 / 非交易日", ["非交易日或休市"], extra=msg)); pub.push(live_state(ds, "非交易日", note=msg), force=True); sys.exit(0 if a.publish else 2)
     cand, info = open_stage(pool, snap.rename(columns={"o": "open"}), today)
     info["n_cand"] = len(cand)
     print(f"09:02 開盤: 有開盤價 {info['n_open']}/{info['n_liq']}；大盤平均跳空 {info['mkt_gap']*100:+.2f}%  上漲家數比 {info['breadth']*100:.0f}%；跳空≥2% 的池內候選 {len(cand)} 檔")
     if not info["trade_ok"]:
         print("今日不交易: " + "；".join(info["reasons"]))
-        line.push(f"⛔ {ds} 今日不交易: " + "；".join(info["reasons"]) + f"\n大盤平均跳空 {info['mkt_gap']*100:+.2f}%  上漲家數比 {info['breadth']*100:.0f}%  候選 {len(cand)} 檔"
-                  + ("\n(--force: 照跑, 僅供觀察)" if a.force else "") + "\n(系統正常運作)")
+        line.push(card_notrade(ds, "⛔ 今日不交易", info["reasons"], info, len(cand), "(--force: 照跑, 僅供觀察)" if a.force else ""))
         if not a.force:
             cand.to_csv(SIG / f"{ds}_cand.csv", index=False)
             pub.push(live_state(ds, "不交易", info, cand=cand, note="；".join(info["reasons"])), force=True); pub.upload_day(ds); return
@@ -657,15 +705,14 @@ def _run(a, line):
             m["h"] = np.nanmax([m["h"], r.h]); m["l"] = np.nanmin([m["l"], r.l]); m["z"] = last
             book.bars.add(r.stock_id, t, r.z, r.v)
         sig = [e for e in new_ev if e["event"] in ("SHORT", "STOP")]
-        if sig: line.push(line_events(sig), stocks=[(e["stock_id"], e["name"], mk[e["stock_id"]]) for e in sig])                 # 先推 LINE 再上傳 HF (HF 重試可能卡十幾秒)
+        if sig: line.push(card_events(sig, book, ds))                 # 先推 LINE 再上傳 HF (HF 重試可能卡十幾秒)
         for sid in ids:                                    # 12:00 後 WAIT 失效
             if book.s[sid]["state"] == "WAIT" and t >= P["DEADLINE"] + 1: book.s[sid]["state"] = "EXPIRED"
         holding = [s for s, p in book.s.items() if p["state"] == "SHORT"]
         if not reminded and t >= 264 and holding:           # 13:24
             print(f"⏰ 13:24 提醒: 持有 {len(holding)} 檔 {holding}, 13:25 前掛市價買回參加收盤競價"); reminded = True
             if a.notify: notify("收盤回補提醒", f"{len(holding)} 檔: {' '.join(holding)}")
-            line.push(f"⏰ 收盤回補提醒: 持有 {len(holding)} 檔, 13:25 前掛市價買回\n" + "\n".join(f"{s} {book.s[s]['name']} {book.s[s]['lots']} 張" for s in holding),
-                      stocks=[(s, book.s[s]["name"], mk[s]) for s in holding])
+            line.push(card_reminder(holding, book, mem, ds))
             pub.push(live_state(ds, "收盤回補提醒", info, book, mem, excl, note=f"13:25 前掛市價買回 {len(holding)} 檔"), force=True)
         pub.push(live_state(ds, "監看中", info, book, mem, excl), event=bool(new_ev)); new_ev.clear()
         if not book.active() or (not holding and t >= P["DEADLINE"] + 1): break
@@ -681,23 +728,31 @@ def _run(a, line):
     evf.close()
     summarize(book.trades(), ds, SIG, info)
     tr = book.trades()
-    line.push(line_summary(tr, ds, info), stocks=[(r.stock_id, r.name, mk[r.stock_id]) for r in tr.itertuples()] if len(tr) else None,
-              links=[("🌐 今日訊號頁", f"{SITE}/#live/{ds}")])
+    line.push(card_summary(tr, ds, info))
     st = live_state(ds, "已結算", info, book, mem, excl)
     (SIG / f"{ds}_chart.json").write_text(json.dumps(_jclean(st), ensure_ascii=False, default=_jdefault), encoding="utf-8")   # 隨 upload_day 上傳, chart.html 看歷史日用
     pub.push(st, force=True); pub.upload_day(ds)
 
 def cmd_line_test(a):
-    stocks, ds = [("2330", "台積電", "twse")], None
-    try:                                                    # 用最近一天真的有進場的股票當範例, 按鈕點開才有圖
-        import requests
-        idx = requests.get(f"{HF_BASE}/web/index.json", timeout=15).json()
-        d = [x for x in idx["days"] if x.get("n_trades")][-1]["date"]
-        tr = requests.get(f"{HF_BASE}/web/days/{d}.json", timeout=15).json()["trades"][:2]
-        if tr: stocks, ds = [(r["stock_id"], r["name"], "") for r in tr], d
-    except Exception as e: print(f"讀回測資料失敗 ({e}), 用 2330 當範例")
-    ok = Line(True).push(a.text or f"✅ orb_live LINE 測試 {now_tw():%Y-%m-%d %H:%M:%S}\n點下面按鈕會開自己的 K 線頁 ({ds or '今天'}: 區間低=進場線、區間高=停損線、進出場標記)",
-                         stocks=None if a.text else [(sid, name, mkt, ds) for sid, name, mkt in stocks])
+    """--text 給了就推那段文字 (第一行當標題, ❌ 開頭用紅色出錯樣式); 沒給就拿最近一天真的有進場的回測結果, 推一張結算卡片當範例。"""
+    if a.text: msg = LC.from_text(a.text, kind="error" if a.text.startswith("❌") else "info")
+    else:
+        tr, ds, info = pd.DataFrame(), now_tw().strftime("%Y-%m-%d"), {"mkt_gap": np.nan, "n_watch": 0}
+        try:
+            import requests
+            idx = requests.get(f"{HF_BASE}/web/index.json", timeout=15).json()
+            ds = [x for x in idx["days"] if x.get("n_trades")][-1]["date"]
+            j = requests.get(f"{HF_BASE}/web/days/{ds}.json", timeout=15).json()
+            tr = pd.DataFrame(j["trades"][:5]); sm = j.get("summary") or {}
+            for k, v in dict(entry_t=np.nan, exit_px=np.nan, reason="", lots=1).items():
+                if k not in tr: tr[k] = v
+            tr["pnl"] = tr.r_pct / 100 * tr.entry_px * tr.lots * 1000
+            info = {"mkt_gap": sm.get("mkt_gap", np.nan), "n_watch": sm.get("n_watch", len(tr))}
+        except Exception as e: print(f"讀回測資料失敗 ({e}), 推空的結算卡片")
+        msg = card_summary(tr, ds, info)
+        msg["contents"]["header"]["contents"][1]["contents"][1:] = [{"type": "text", "text": "🧪 測試 (回測範例)", "size": "xxs", "color": LC.INK2, "align": "end", "gravity": "center"}]
+        msg["altText"] = "🧪 LINE 測試: " + msg["altText"]
+    ok = Line(True).push(msg)
     print("LINE 推播成功" if ok else "LINE 推播失敗"); sys.exit(0 if ok else 1)
 
 def cmd_replay(a):

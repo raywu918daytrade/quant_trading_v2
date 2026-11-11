@@ -1,6 +1,6 @@
 name: LINE test
 on:
-  # 手機也能測: GitHub App / 網頁 → Actions → LINE test → Run workflow, 推一則附「台積電、環球晶」線圖按鈕的測試訊息
+  # 手機也能測: GitHub App / 網頁 → Actions → LINE test → Run workflow, 先用 LINE validate API 檢查每種推播卡片的格式 (不推、不算額度), 再推一張結算卡片範例 (最近一天有進場的回測)
   workflow_dispatch:
 jobs:
   line-test:
@@ -16,6 +16,10 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
       - run: pip install -q -r requirements.txt
+      - name: Validate every card type
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+        run: python3 -W ignore line_bot/test/validate_push.py
       - name: Push test message
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
