@@ -1,0 +1,23 @@
+name: LINE test
+on:
+  # 手機也能測: GitHub App / 網頁 → Actions → LINE test → Run workflow, 推一則附「台積電、環球晶」線圖按鈕的測試訊息
+  workflow_dispatch:
+jobs:
+  line-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TZ: Asia/Taipei
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: pip install -q -r requirements.txt
+      - name: Push test message
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+        run: python3 -W ignore scripts/orb_live.py line-test
