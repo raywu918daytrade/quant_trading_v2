@@ -449,8 +449,7 @@ def card_summary(tr, ds, info):
     blocks = []
     if len(tr):
         tot = tr.pnl.sum(); win = (tr.r_pct > 0).mean() * 100; avg = tr.r_pct.mean()
-        blocks += [LC.tiles(LC.tile("合計損益", LC.yuan(tot), "元, 含成本", LC.color(tot)), LC.tile("勝率", f"{win:.0f}%", f"{len(tr)} 筆"),
-                            LC.tile("平均", LC.pct(avg), "每筆", LC.color(avg))), LC.sep()]
+        blocks += [LC.tiles(LC.tile("合計損益 (元)", LC.yuan(tot), "含成本", LC.color(tot)), LC.tile("勝率", f"{win:.0f}%", f"{len(tr)} 筆 · 平均 {LC.pct(avg)}")), LC.sep()]
         for r in tr.itertuples():
             how = "停損" if r.reason.startswith("停損") else "收盤"
             blocks.append(LC.row(f"{r.stock_id} {r.name}", f"{_hm(r.entry_t)} 空 {LC.f2(r.entry_px)} → {how} {LC.f2(r.exit_px)} · {r.lots} 張",
@@ -749,9 +748,12 @@ def cmd_line_test(a):
             tr["pnl"] = tr.r_pct / 100 * tr.entry_px * tr.lots * 1000
             info = {"mkt_gap": sm.get("mkt_gap", np.nan), "n_watch": sm.get("n_watch", len(tr))}
         except Exception as e: print(f"讀回測資料失敗 ({e}), 推空的結算卡片")
-        msg = card_summary(tr, ds, info)
-        msg["contents"]["header"]["contents"][1]["contents"][1:] = [{"type": "text", "text": "🧪 測試 (回測範例)", "size": "xxs", "color": LC.INK2, "align": "end", "gravity": "center"}]
-        msg["altText"] = "🧪 LINE 測試: " + msg["altText"]
+        msg = card_summary(tr, ds, info)                    # 標題改成「回測範例 日期」, 免得和今天的損益搞混
+        hd = msg["contents"]["header"]["contents"]
+        hd[1]["contents"] = [{**hd[1]["contents"][0], "text": f"🧪 回測範例 {ds[5:]}"}]
+        hd[2]["text"] = f"⚠ 不是今天的資料: {ds} 回測結果, 只用來測試卡片外觀"; hd[2]["color"] = LC.ACCENT["warn"]
+        msg["contents"]["footer"]["contents"][0]["action"]["label"] = f"🌐 {ds} 訊號頁"
+        msg["altText"] = f"🧪 LINE 測試 (回測範例 {ds}, 不是今天的資料)"
     ok = Line(True).push(msg)
     print("LINE 推播成功" if ok else "LINE 推播失敗"); sys.exit(0 if ok else 1)
 

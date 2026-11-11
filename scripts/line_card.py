@@ -33,7 +33,7 @@ def tile(name, value, sub="", c=None):
     """大數字格子; value 是字串 (已格式化), c 是顏色。"""
     return {"type": "box", "layout": "vertical", "flex": 1, "backgroundColor": TILE, "cornerRadius": "8px", "paddingAll": "8px", "contents": [
         {"type": "text", "text": name, "size": "xxs", "color": INK2},
-        {"type": "text", "text": str(value), "size": "lg", "weight": "bold", "color": c or INK},
+        {"type": "text", "text": str(value), "size": "lg", "weight": "bold", "color": c or INK, "adjustMode": "shrink-to-fit"},
         *([{"type": "text", "text": sub, "size": "xxs", "color": INK2}] if sub else [])]}
 
 def tiles(*ts): return {"type": "box", "layout": "horizontal", "spacing": "md", "contents": list(ts)}
