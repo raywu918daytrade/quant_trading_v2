@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo
 import numpy as np, pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import ROOT, RAW, PROC, COST, HF_REPO, HF_PREFIX
+from config import ROOT, RAW, PROC, COST, HF_REPO, HF_PREFIX, HF_BASE
 
 TZ = ZoneInfo("Asia/Taipei")
 LIVE = ROOT / "data" / "live"
@@ -386,7 +386,7 @@ class Line:
         """stocks = [(代號, 名稱, 市場)]: 訊息下方加「📈 代號 名稱」按鈕, 點了開 Yahoo 股市走勢圖; links = [(標籤, 網址)] 額外按鈕。
         有按鈕時送 Flex 訊息 (仍算 1 則); LINE 拒收 Flex (400) 時改送純文字 + 網址, 確保訊息一定送得到。"""
         if not self.enabled: return False
-        btns = [(f"📈 {sid} {name}", chart_url(sid, mkt)) for sid, name, mkt in dict.fromkeys(stocks or [])] + list(links or [])
+        btns = [(f"📈 {x[0]} {x[1]} K線", chart_url(x[0], x[2], *x[3:])) for x in dict.fromkeys(stocks or [])] + list(links or [])
         if btns:
             r = self._post([line_flex(text, btns)])
             if r is not None: return r
@@ -407,9 +407,9 @@ class Line:
         return False
 
 SITE = "https://fade.just1stock.com"
-def chart_url(sid, market):
-    """Yahoo 股市個股頁 (盤中即時走勢圖 + K 線), 手機 LINE 內建瀏覽器可直接開。上市 .TW / 上櫃 .TWO。"""
-    return f"https://tw.stock.yahoo.com/quote/{sid}.{'TWO' if str(market).lower() in ('tpex', 'otc') else 'TW'}"
+def chart_url(sid, market, ds=None):
+    """自己的 K 線頁 web/chart.html: 盤中 1 分 K + 區間低 (進場) / 區間高 (停損) 線 + 進場 / 出場標記; 頁內另有 Yahoo 股市連結。"""
+    return f"{SITE}/web/chart.html?d={ds or now_tw().strftime('%Y-%m-%d')}&s={sid}"
 
 def line_flex(text, btns):
     """文字 + 一排連結按鈕的 Flex bubble。altText 是通知列預覽 (上限 400 字)。按鈕標籤上限 40 字。"""
@@ -446,6 +446,24 @@ def _jdefault(o):
     return str(o)
 
 STATE_TXT = {"WAIT": "等待跌破", "SHORT": "已放空", "STOPPED": "已停損", "CLOSED": "收盤回補", "EXPIRED": "未跌破 (12:00 失效)", "FULL": "跌破但額滿"}
+class Bars:
+    """盤中自己記的 1 分 K (給網頁 chart.html 畫進場 / 停損用): 每次輪詢的成交價 z 併進當分鐘, 量 = MIS 累計量 v 的差 (張)。
+    09:00~09:04 沒有逐筆, 用 09:05 快照的 開 / 區間高 / 區間低 / 現價 合成一根 (t=4)。"""
+    def __init__(self): self.b = {}; self.cum = {}
+    def seed(self, sid, o, h, l, c, v):
+        if all(np.isfinite(x) for x in (o, h, l, c)):
+            self.b.setdefault(sid, {})[4] = [float(o), float(h), float(l), float(c), float(v) if np.isfinite(v) else 0.0]
+        if np.isfinite(v): self.cum[sid] = float(v)
+    def add(self, sid, t, px, cumv):
+        if not np.isfinite(px): return
+        m = int(t); d = self.b.setdefault(sid, {})
+        dv = max(cumv - self.cum.get(sid, cumv), 0.0) if np.isfinite(cumv) else 0.0
+        if np.isfinite(cumv): self.cum[sid] = float(cumv)
+        if m in d: o, h, l, c, v = d[m]; d[m] = [o, max(h, px), min(l, px), float(px), v + dv]
+        else: d[m] = [float(px)] * 4 + [dv]
+    def out(self):
+        return {sid: [[t, *map(lambda x: round(x, 2), b)] for t, b in sorted(d.items())] for sid, d in self.b.items()}
+
 def live_state(ds, phase, info=None, book=None, mem=None, excl=None, cand=None, note=""):
     st = {"date": ds, "phase": phase, "note": note, "rule": "跳空≥2% ∩ ATR20≥3% ∩ 開盤5分量≥日均量5%; 跌破開盤5分區間低放空, 區間高停損, 否則收盤回補"}
     if info: st.update({k: info.get(k) for k in ["mkt_gap", "breadth", "n_cand", "n_watch", "trade_ok", "reasons", "n_open", "n_liq"]})
@@ -458,6 +476,7 @@ def live_state(ds, phase, info=None, book=None, mem=None, excl=None, cand=None, 
             rows.append(dict(stock_id=sid, name=p["name"], pc=p["pc"], gap=p["gap"], rl=p["rl"], rh=p["rh"], force_px=p["fpx"], lots=p["lots"], state=p["state"], state_txt=STATE_TXT.get(p["state"], p["state"]),
                              entry_px=p["entry_px"], entry_t=p["entry_t"], exit_px=p["exit_px"], exit_t=p["exit_t"], last=last, pnl_pct=pnl))
         st["watch"] = rows; st["events"] = book.events; st["slot"] = book.slot
+        if getattr(book, "bars", None) is not None: st["bars"] = book.bars.out()
         tr = book.trades()
         if len(tr): st["realized"] = dict(n=len(tr), avg_pct=float(tr.r_pct.mean()), pnl=float(tr.pnl.sum()))
     if excl is not None and len(excl): st["excluded"] = [dict(stock_id=r.stock_id, name=r.name, gap=r.gap, reason=r.excluded) for r in excl.itertuples()]
@@ -611,6 +630,8 @@ def _run(a, line):
     print(f"\n09:05 監看名單 {len(watch)} 檔 (每檔額度 {book.slot:,.0f} 元):\n" + (fmt_watch(watch) if len(watch) else "(無)"))
     if len(excl): print("剔除: " + ", ".join(f"{r.stock_id}{r.name}({r.excluded})" for r in excl.itertuples()))
     mem = {r.stock_id: dict(h=r.rh, l=r.rl, z=np.nan) for r in watch.itertuples()}
+    book.bars = Bars()
+    for r in s5[s5.stock_id.isin(watch.stock_id)].itertuples(): book.bars.seed(r.stock_id, r.o, r.rh, r.rl, r.z, r.o5_v)
     pub.push(live_state(ds, "監看中", info, book, mem, excl), force=True)
     evf = open(SIG / f"{ds}_events.csv", "a", encoding="utf-8")
     new_ev = []
@@ -634,6 +655,7 @@ def _run(a, line):
             if np.isfinite(hi) or np.isfinite(lo):
                 book.step(t, r.stock_id, lo if np.isfinite(lo) else np.inf, hi if np.isfinite(hi) else -np.inf, last, last)
             m["h"] = np.nanmax([m["h"], r.h]); m["l"] = np.nanmin([m["l"], r.l]); m["z"] = last
+            book.bars.add(r.stock_id, t, r.z, r.v)
         sig = [e for e in new_ev if e["event"] in ("SHORT", "STOP")]
         if sig: line.push(line_events(sig), stocks=[(e["stock_id"], e["name"], mk[e["stock_id"]]) for e in sig])                 # 先推 LINE 再上傳 HF (HF 重試可能卡十幾秒)
         for sid in ids:                                    # 12:00 後 WAIT 失效
@@ -655,16 +677,27 @@ def _run(a, line):
         wait_until(13, 31, 0)
         fin = mis.closes(holding, [mk[s] for s in holding])
         book.close_all({s: fin.get(s, mem[s]["z"]) for s in holding})
+        for s in holding: book.bars.add(s, 270, book.s[s]["exit_px"], np.nan)      # 13:30 收盤那根
     evf.close()
     summarize(book.trades(), ds, SIG, info)
     tr = book.trades()
     line.push(line_summary(tr, ds, info), stocks=[(r.stock_id, r.name, mk[r.stock_id]) for r in tr.itertuples()] if len(tr) else None,
               links=[("🌐 今日訊號頁", f"{SITE}/#live/{ds}")])
-    pub.push(live_state(ds, "已結算", info, book, mem, excl), force=True); pub.upload_day(ds)
+    st = live_state(ds, "已結算", info, book, mem, excl)
+    (SIG / f"{ds}_chart.json").write_text(json.dumps(_jclean(st), ensure_ascii=False, default=_jdefault), encoding="utf-8")   # 隨 upload_day 上傳, chart.html 看歷史日用
+    pub.push(st, force=True); pub.upload_day(ds)
 
 def cmd_line_test(a):
-    ok = Line(True).push(a.text or f"✅ orb_live LINE 測試 {now_tw():%Y-%m-%d %H:%M:%S}\n點下面按鈕應該會開 Yahoo 股市走勢圖",
-                         stocks=None if a.text else [("2330", "台積電", "twse"), ("6488", "環球晶", "tpex")])
+    stocks, ds = [("2330", "台積電", "twse")], None
+    try:                                                    # 用最近一天真的有進場的股票當範例, 按鈕點開才有圖
+        import requests
+        idx = requests.get(f"{HF_BASE}/web/index.json", timeout=15).json()
+        d = [x for x in idx["days"] if x.get("n_trades")][-1]["date"]
+        tr = requests.get(f"{HF_BASE}/web/days/{d}.json", timeout=15).json()["trades"][:2]
+        if tr: stocks, ds = [(r["stock_id"], r["name"], "") for r in tr], d
+    except Exception as e: print(f"讀回測資料失敗 ({e}), 用 2330 當範例")
+    ok = Line(True).push(a.text or f"✅ orb_live LINE 測試 {now_tw():%Y-%m-%d %H:%M:%S}\n點下面按鈕會開自己的 K 線頁 ({ds or '今天'}: 區間低=進場線、區間高=停損線、進出場標記)",
+                         stocks=None if a.text else [(sid, name, mkt, ds) for sid, name, mkt in stocks])
     print("LINE 推播成功" if ok else "LINE 推播失敗"); sys.exit(0 if ok else 1)
 
 def cmd_replay(a):

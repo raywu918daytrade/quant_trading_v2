@@ -291,7 +291,10 @@ live.yml 盤中把訊號推到自己的 LINE (LINE Notify 已於 2025-03 停用,
 - 推播內容: SHORT 進場 (代號、成交價、張數、停損價)、STOP 停損、13:24 收盤回補提醒 (持有檔數與張數)、13:31 結算 (逐檔報酬與損益、平均、勝率、合計)。不推 09:05 監看名單、FULL。
 - **每天都會有一則 (2026-11-06 起)**: 不交易的日子也推, 才知道系統是活的 — 😴 週一不交易 / 非交易日 (MIS 日期不是今天)、⛔ 今日不交易 (原因 + 大盤平均跳空 + 上漲家數比 + 候選檔數)。交易日則至少有 13:31 結算那一則。
 - **出錯也推**: `run` 中途拋例外或被中斷 → ❌ 錯誤類型與訊息；live.yml 在 run 之前就失敗 (安裝 / refresh)、逾時或被取消 → 另一個步驟用 `line-test --text` 推 ❌。所以平日 09:05 前沒收到任何 LINE 就代表排程根本沒啟動 (cron-job.org / GitHub)。
-- **點股票看線圖 (2026-11-11)**: 進場 / 停損、13:24 回補提醒、結算這幾則改送 Flex 訊息, 下方每檔一個「📈 代號 名稱」按鈕 → 開 Yahoo 股市個股頁 (`tw.stock.yahoo.com/quote/<代號>.TW`, 上櫃 `.TWO`; 盤中即時走勢圖, 也可切 K 線)。結算另有「🌐 今日訊號頁」按鈕 → `fade.just1stock.com/#live/<日期>`。同一次 push 仍算 1 則。LINE 若拒收 Flex (400) 會自動改送純文字 + 網址。`line-test` 會附 2 個範例按鈕, 可用來確認；手機上用 GitHub → Actions → **LINE test** → Run workflow 也能推這則測試。
+- **點股票看自己的 K 線 (2026-11-11)**: 進場 / 停損、13:24 回補提醒、結算這幾則是 Flex 訊息, 下方每檔一個「📈 代號 名稱 K線」按鈕 → `web/chart.html?d=<日期>&s=<代號>` (https://fade.just1stock.com/web/chart.html)。頁面畫 1 分 K + 區間低 (藍虛線 = 進場線) / 區間高 (橘虛線 = 停損線) / 昨收, 並標出 ▼ 放空、▲ 停損 / 回補的時間與價格；同日其他監看股可切換, 另有回測 K 線與 Yahoo 股市連結。結算另有「🌐 今日訊號頁」。同一次 push 仍算 1 則；LINE 拒收 Flex (400) 時自動改送純文字 + 網址。
+  - 盤中分 K 是 `orb_live.py` 自己記的 (`Bars`): 每 10 秒輪詢的成交價併進當分鐘, 量 = MIS 累計量差；09:00~09:04 用 09:05 快照合成 1 根；停損 / 失效後那檔就不再輪詢, 所以 K 線停在出場。放在 live.json 的 `bars` (盤中每 2~3 分鐘上傳), 收盤另存 `db/orb/live/<d>/<d>_chart.json`。
+  - chart.html 資料順序: 當天 live.json → 過去日 `_chart.json` → 夜間回測 `web/days/<d>.json` (完整分 K)。盤中每 20 秒重讀。
+  - 測試: `line-test` (或手機 GitHub → Actions → **LINE test** → Run workflow) 會用最近一個有進場的回測日當範例按鈕。
 - 額度: 免費方案每月 200 則 (push 給 1 人算 1 則)。同一次 10 秒輪詢內的多檔事件合併成 1 則；日均進場 5~6 檔、約一半停損 → 每天約 10 則、每月約 170 則。超過額度 LINE 回 429, 程式只印警告、不影響訊號與 HF 上傳。
 - 一次性設定: (1) [LINE Official Account Manager](https://manager.line.biz/) 建官方帳號 → 設定 → Messaging API → 啟用；(2) [LINE Developers Console](https://developers.line.biz/console/) 該 channel 的 Messaging API 分頁發 Channel access token (long-lived), Basic settings 分頁最下面抄 Your user ID (`U` 開頭 33 碼)；(3) 用自己的 LINE 加該官方帳號好友 (沒加好友 push 會失敗)；(4) GitHub repo Secrets 加 `LINE_CHANNEL_ACCESS_TOKEN`、`LINE_USER_ID`。沒設 secret 時 live.yml 照跑, 只印「不推播」。
 - 測試: `LINE_CHANNEL_ACCESS_TOKEN=... LINE_USER_ID=... python3 scripts/orb_live.py line-test` 推一則測試訊息 (成功 exit 0)。本機盤中也可 `run --line`。
