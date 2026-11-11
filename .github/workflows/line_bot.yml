@@ -25,6 +25,13 @@ jobs:
         run: |
           miss=""; for k in CLOUDFLARE_API_TOKEN LINE_CHANNEL_ACCESS_TOKEN LINE_CHANNEL_SECRET LINE_USER_ID; do [ -z "${!k}" ] && miss="$miss $k"; done
           if [ -n "$miss" ]; then echo "::warning::還沒設定 repo Secrets:$miss — 先跳過部署 (設好後手動 Run workflow)"; echo "ok=0" >> "$GITHUB_OUTPUT"; else echo "ok=1" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/setup-node@v4
+        if: steps.chk.outputs.ok == '1'
+        with:
+          node-version: "22"
+      - name: Validate reply messages with LINE (format check, nothing is sent)
+        if: steps.chk.outputs.ok == '1'
+        run: node line_bot/test/validate.mjs
       - name: Deploy worker
         id: wr
         if: steps.chk.outputs.ok == '1'

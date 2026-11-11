@@ -1,7 +1,8 @@
 // LINE 指令機器人 (Cloudflare Worker)。LINE 把使用者傳的訊息 POST 到這裡 (webhook), 這裡讀 HF 上的 live.json / paper/live.json 後用 reply API 回覆。
 // reply 訊息免費, 不吃每月 push 額度。只回 ALLOWED_USERS (預設 = LINE_USER_ID) 的訊息。
 //
-// 加新指令: 在 COMMANDS 加一筆 { keys, desc, run(ctx, arg) }, run 回傳 LINE message 物件陣列 (最多 5 個), 用 text() / withButtons() 組。
+// 加新指令: 在 COMMANDS 加一筆 { keys, desc, run(ctx, arg) }, run 回傳 LINE message 物件陣列 (最多 5 個), 用 card({ title, sub, blocks, footer }) 組;
+// blocks 用 kv() / stockRow() / tile() / note() / sep() 這些小積木, 外觀才會一致。
 // 環境變數 (wrangler secret): LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, LINE_USER_ID (可逗號分隔多人)。
 
 const HF = "https://huggingface.co/datasets/raywu918daytrade/daytrade/resolve/main/db/orb/";
@@ -14,7 +15,7 @@ const COMMANDS = [
   { keys: ["持倉", "部位", "p", "pos"], desc: "持倉　目前持有中的部位 (訊號 + 模擬單)", run: (ctx) => positions(ctx, false) },
   { keys: ["損益", "pnl", "$"], desc: "損益　今日已實現 + 未實現損益", run: (ctx) => positions(ctx, true) },
   { keys: ["狀態", "status", "s"], desc: "狀態　程式現在跑到哪一步", run: status },
-  { keys: ["網頁", "web", "w"], desc: "網頁　今日持倉頁 / 訊號頁 / 回測頁", run: () => [withButtons("網頁", [["📋 今日持倉 / 損益", SITE + "today.html"], ["📈 即時訊號 vs 模擬單", SITE + "index.html#live"], ["📊 歷史回測", SITE + "index.html"]])] },
+  { keys: ["網頁", "web", "w"], desc: "網頁　今日持倉頁 / 訊號頁 / 回測頁", run: () => [card({ title: "網頁", blocks: [link("今日持倉 / 損益", SITE + "today.html"), link("即時訊號 vs 模擬單", SITE + "index.html#live"), link("歷史回測", SITE + "index.html")] })] },
   { keys: ["說明", "help", "?", "？", "指令"], desc: "說明　列出所有指令", run: () => [help()] },
 ];
 // 四碼數字 = 查個股 (今天的監看狀態 + K 線按鈕)
@@ -63,53 +64,88 @@ function notTrading(live) {
 function positions(ctx, withClosed) {
   const { live, paper } = ctx;
   const why = notTrading(live);
-  if (why) return [text(`📋 ${why}`)];
+  if (why) return [card({ title: withClosed ? "今日損益" : "目前持倉", sub: live ? `${live.date}` : "", blocks: [note(why)] })];
   const S = sigRows(live), M = simRows(paper);
-  const sum = (rs, f) => rs.filter(f).reduce((a, r) => a + (r.pnl || 0), 0);
-  const line = (r) => `${r.hold ? "🔵" : r.stop ? "🟠" : "⚪"} ${r.sid} ${r.name} ${r.lots}張\n　空 ${f2(r.entry)} → ${r.hold ? "現價" : "出場"} ${f2(r.ref)}　${yuan(r.pnl)} (${pct(r.pct)})`;
+  const total = (rs, f = () => true) => rs.filter(f).reduce((a, r) => a + (r.pnl || 0), 0);
   const pick = (rs) => (withClosed ? rs : rs.filter((r) => r.hold));
-  const head = `${withClosed ? "💰 今日損益" : "📋 目前持倉"}　${live.date} ${live.phase}${live.updated_at ? "　" + live.updated_at.slice(11, 16) : ""}`;
-  const parts = [head];
+  const tiles = [tile("即時訊號", withClosed ? total(S) : total(S, (r) => r.hold), withClosed ? `持有 ${S.filter((r) => r.hold).length} / 進場 ${S.length}` : `持有 ${S.filter((r) => r.hold).length} 檔`)];
+  if (paper) tiles.push(tile("永豐模擬單", withClosed ? total(M) : total(M, (r) => r.hold), withClosed ? `持有 ${M.filter((r) => r.hold).length} / 成交 ${M.length}` : `持有 ${M.filter((r) => r.hold).length} 檔`));
+  const blocks = [{ type: "box", layout: "horizontal", spacing: "md", contents: tiles }];
   const sec = (title, rs) => {
     const xs = pick(rs);
-    parts.push(`\n【${title}】` + (withClosed ? `　合計 ${yuan(sum(rs, () => true))} (已實現 ${yuan(sum(rs, (r) => !r.hold))}、未實現 ${yuan(sum(rs, (r) => r.hold))})` : `　持有 ${xs.length} 檔、未實現 ${yuan(sum(rs, (r) => r.hold))}`));
-    parts.push(xs.length ? xs.map(line).join("\n") : withClosed ? "今天沒有進場" : "目前沒有持倉");
+    blocks.push(sep(), label(title));
+    blocks.push(...(xs.length ? xs.map((r) => stockRow(live.date, r)) : [note(withClosed ? "今天沒有進場" : "目前沒有持倉")]));
   };
   sec("即時訊號", S);
   if (paper) sec("永豐模擬單", M);
-  const shown = [...new Map([...pick(S), ...pick(M)].map((r) => [r.sid, r])).values()];
-  return [withButtons(parts.join("\n"), [...shown.slice(0, 8).map((r) => [`📈 ${r.sid} ${r.name} K線`, chartUrl(live.date, r.sid)]), ["📋 今日持倉頁", SITE + "today.html"]])];
+  if (withClosed) {
+    const sumLine = (rs) => `已實現 ${yuan(total(rs, (r) => !r.hold))}　未實現 ${yuan(total(rs, (r) => r.hold))}`;
+    blocks.push(sep(), small(`訊號 ${sumLine(S)}` + (paper ? `\n模擬 ${sumLine(M)}` : "")));
+  }
+  const upd = live.updated_at ? live.updated_at.slice(11, 16) : "";
+  return [card({ title: withClosed ? "今日損益" : "目前持倉", sub: `${live.date}　${live.phase}${upd ? "　" + upd + " 更新" : ""}`, blocks,
+    footer: ["完整持倉頁", SITE + "today.html"], hint: "點股票看 K 線" })];
 }
 function status(ctx) {
   const { live, paper } = ctx;
-  if (!live) return [text("讀不到 live.json")];
-  const lines = [`🤖 ${live.date} 即時訊號：${live.phase}${live.updated_at ? "（更新 " + live.updated_at.slice(11, 19) + "）" : ""}`];
-  if (ok(live.mkt_gap)) lines.push(`大盤平均跳空 ${pct(live.mkt_gap * 100)}　候選 ${live.n_cand ?? "–"}　監看 ${live.n_watch ?? "–"}`);
-  if (live.note) lines.push(live.note);
-  lines.push(paper ? `模擬單：${paper.phase}` : "模擬單：今天還沒有資料");
-  if (ACTIVE.includes(live.phase)) lines.push("（盤中約每 2~3 分鐘更新一次）");
-  return [text(lines.join("\n"))];
+  if (!live) return [card({ title: "系統狀態", blocks: [note("讀不到 live.json")] })];
+  const rows = [kv("即時訊號", live.phase), kv("模擬單", paper ? paper.phase : "今天還沒有資料")];
+  if (ok(live.mkt_gap)) rows.push(kv("大盤平均跳空", pct(live.mkt_gap * 100)));
+  if (live.n_cand !== undefined) rows.push(kv("候選 / 監看", `${live.n_cand ?? "–"} / ${live.n_watch ?? "–"}`));
+  if (live.updated_at) rows.push(kv("最後更新", live.updated_at.slice(11, 19)));
+  if (live.note) rows.push(sep(), small(live.note));
+  return [card({ title: "系統狀態", sub: live.date, blocks: rows, footer: ["今日訊號頁", SITE + "index.html#live"] })];
 }
 function stock(ctx, sid) {
   const { live } = ctx;
   const r = (live?.watch || []).find((x) => x.stock_id === sid);
-  if (!r) return [withButtons(`${sid} 不在今天的監看名單`, [[`📈 ${sid} K線 (Yahoo)`, `https://tw.stock.yahoo.com/quote/${sid}`]])];
+  if (!r) return [card({ title: sid, blocks: [note("不在今天的監看名單")], footer: ["Yahoo 股市", `https://tw.stock.yahoo.com/quote/${sid}`] })];
   const p = ok(r.entry_px) ? pnl(r.entry_px, r.state === "SHORT" ? r.last : r.exit_px, r.lots) : null;
-  const t = [`${r.stock_id} ${r.name}　${r.state_txt}`, `進場線 ${f2(r.rl)}　停損線 ${f2(r.rh)}　現價 ${f2(r.last)}`];
-  if (ok(r.entry_px)) t.push(`${hm(r.entry_t)} 空 ${f2(r.entry_px)} × ${r.lots} 張` + (ok(r.exit_px) ? `　${hm(r.exit_t)} 出 ${f2(r.exit_px)}` : "") + `\n損益 ${yuan(p)} (${pct(r.pnl_pct)})`);
-  return [withButtons(t.join("\n"), [[`📈 ${sid} ${r.name} K線`, chartUrl(live.date, sid)]])];
+  const rows = [kv("狀態", r.state_txt), kv("進場線 / 停損線", `${f2(r.rl)} / ${f2(r.rh)}`), kv("現價", f2(r.last))];
+  if (ok(r.entry_px)) rows.push(kv("放空", `${hm(r.entry_t)}　${f2(r.entry_px)} × ${r.lots} 張`));
+  if (ok(r.exit_px)) rows.push(kv(r.state === "STOPPED" ? "停損" : "回補", `${hm(r.exit_t)}　${f2(r.exit_px)}`));
+  if (ok(p)) rows.push(kv("損益", `${yuan(p)}（${pct(r.pnl_pct)}）`, color(p)));
+  return [card({ title: `${r.stock_id} ${r.name}`, sub: live.date, blocks: rows, footer: ["看 K 線", chartUrl(live.date, sid)] })];
 }
 function help() {
-  return text("可以打這些指令：\n" + COMMANDS.map((c) => "・" + c.desc).join("\n") + "\n・四碼代號 (例如 2330)　查這檔今天的狀態與 K 線");
+  return card({ title: "指令", blocks: [...COMMANDS.map((c) => { const [k, ...d] = c.desc.split("　"); return kv(k, d.join(" ")); }), kv("四碼代號", "例如 2330，查今天狀態與 K 線")] });
 }
 
-// ---------------- LINE 訊息格式 ----------------
+// ---------------- LINE 訊息格式 (Flex) ----------------
+const UP = "#d33a33", DN = "#1a9e6a", INK = "#121212", INK2 = "#6b6a65", LINE_C = "#ececE8";
+const color = (v) => (ok(v) && v > 0 ? UP : ok(v) && v < 0 ? DN : INK);
+const link = (t, uri) => ({ type: "button", style: "link", height: "sm", action: { type: "uri", label: t, uri } });
 function text(t) { return { type: "text", text: t.slice(0, 5000) }; }
-function withButtons(t, btns) {
-  if (!btns.length) return text(t);
-  return { type: "flex", altText: t.slice(0, 400), contents: { type: "bubble", size: "mega",
-    body: { type: "box", layout: "vertical", contents: [{ type: "text", text: t.slice(0, 2000), wrap: true, size: "sm" }] },
-    footer: { type: "box", layout: "vertical", spacing: "none", contents: btns.slice(0, 12).map(([label, uri]) => ({ type: "button", style: "link", height: "sm", action: { type: "uri", label: label.slice(0, 40), uri } })) } } };
+const sep = () => ({ type: "separator", color: LINE_C, margin: "md" });
+const label = (t) => ({ type: "text", text: t, size: "xs", weight: "bold", color: INK2, margin: "md" });
+const note = (t) => ({ type: "text", text: t, size: "sm", color: INK2, wrap: true, margin: "sm" });
+const small = (t) => ({ type: "text", text: t, size: "xxs", color: INK2, wrap: true, margin: "sm" });
+const kv = (k, v, c = INK) => ({ type: "box", layout: "horizontal", margin: "sm", contents: [
+  { type: "text", text: k, size: "sm", color: INK2, flex: 4 }, { type: "text", text: String(v ?? "–"), size: "sm", color: c, flex: 6, align: "end", wrap: true }] });
+function tile(name, v, sub) {
+  return { type: "box", layout: "vertical", flex: 1, backgroundColor: "#f6f5f1", cornerRadius: "8px", paddingAll: "8px", contents: [
+    { type: "text", text: name, size: "xxs", color: INK2 },
+    { type: "text", text: yuan(v), size: "lg", weight: "bold", color: color(v) },
+    { type: "text", text: sub, size: "xxs", color: INK2 }] };
+}
+function stockRow(d, r) {
+  const st = r.hold ? "持有" : r.stop ? "停損" : "回補";
+  return { type: "box", layout: "horizontal", margin: "md", action: { type: "uri", label: "K線", uri: chartUrl(d, r.sid) }, contents: [
+    { type: "box", layout: "vertical", flex: 7, contents: [
+      { type: "text", text: `${r.sid} ${r.name}`, size: "sm", weight: "bold", color: INK },
+      { type: "text", text: `${st} ${f2(r.entry)}→${f2(r.ref)} ${r.lots}張`, size: "xxs", color: INK2 }] },
+    { type: "box", layout: "vertical", flex: 3, contents: [
+      { type: "text", text: yuan(r.pnl), size: "sm", weight: "bold", color: color(r.pnl), align: "end" },
+      { type: "text", text: pct(r.pct), size: "xxs", color: color(r.pnl), align: "end" }] }] };
+}
+function card({ title, sub = "", blocks, footer, hint }) {
+  const bubble = { type: "bubble", size: "mega",
+    header: { type: "box", layout: "vertical", paddingBottom: "6px", contents: [
+      { type: "box", layout: "horizontal", contents: [{ type: "text", text: title, weight: "bold", size: "md", color: INK, flex: 0 }, ...(hint ? [{ type: "text", text: hint, size: "xxs", color: INK2, align: "end", gravity: "center" }] : [])] },
+      ...(sub ? [{ type: "text", text: sub, size: "xxs", color: INK2 }] : [])] },
+    body: { type: "box", layout: "vertical", paddingTop: "0px", contents: blocks } };
+  if (footer) bubble.footer = { type: "box", layout: "vertical", paddingTop: "0px", contents: [{ type: "button", style: "link", height: "sm", action: { type: "uri", label: footer[0], uri: footer[1] } }] };
+  return { type: "flex", altText: `${title} ${sub}`.slice(0, 400), contents: bubble };
 }
 
 // ---------------- webhook ----------------
