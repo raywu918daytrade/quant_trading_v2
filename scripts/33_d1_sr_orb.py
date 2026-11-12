@@ -146,6 +146,8 @@ X["l_r"] = np.where(l, ((ex / X.l_px - 1) - COST - np.where(locked, LOCK, 0)) * 
 X["l_why"] = np.select([~l, force_first, X.l_st.notna(), locked], ["", "強制", "停損", "鎖跌停"], "收盤")
 X["l_ok"] = l & ~X.bad & (X.rl > X.ld * 1.001) & (X.rl > X.pc * (1 - FORCE)) & (X.l_px < X.lu * 0.999)
 print(f"結算完成 {len(X):,} 股票日; 空 {X.s_ok.sum():,} 筆, 多 {X.l_ok.sum():,} 筆 ({time.time()-T0:.0f}s)", flush=True)
+# 全 universe 每檔每日的跌破 / 突破時間 (給 34 算同類股有幾成跌破)
+X[["stock_id", "date", "gap", "dv20", "s_et", "l_et", "bad"]].to_parquet(PROC / "orb5_peers.parquet", index=False)
 
 # ---------------- 最近的壓力 / 支撐 ----------------
 def levels(sid, di, row):
