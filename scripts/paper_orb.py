@@ -212,6 +212,7 @@ class PaperOrb:
         self.orders = defaultdict(list)         # (sid, "Sell"/"Buy") -> [trade]
         self.deals = defaultdict(list)          # (sid, "Sell"/"Buy") -> [(px, qty, dt)]
         self.skipped = {}; self.events = []; self.dirty = False
+        self.final_buy = {}          # settle() 後的回補價 (收盤腳 = 真實收盤價), live.json 用它取代模擬回報價
         self._cur = None; self.clock = now     # replay 換成合成 tick 的時間
         self.book.log = self._on_book_event
         self.sid_lock = defaultdict(threading.RLock)   # 同一檔的 券賣 / 停損 / 收盤 / 補單 依序執行
@@ -409,6 +410,7 @@ class PaperOrb:
                 # 收盤集合競價的成交價就是收盤價; 永豐模擬環境的收盤回報價不可靠 (2026-11-04: 順達 283.5 vs 收盤 271.5、合晶 77.4 vs 83.5),
                 # 所以收盤腳以真實收盤價結算, 模擬回報價另存 broker_buy_px 供對照。
                 if buy_px and np.isfinite(close_px): buy_px = float(close_px)
+            if buy_px: self.final_buy[sid] = buy_px
             # 回測口徑 (理想): 進場 = 區間低, 停損 = 區間高 ×(1+0.1%), 收盤 = 收盤價
             ideal_exit = w["rh"] * (1 + OL.P["STOP_SLIP"]) if X.get("leg") == "stop" else close_px
             r_ideal = 1 - ideal_exit / w["rl"] - COST if (E and np.isfinite(ideal_exit)) else np.nan
@@ -452,6 +454,10 @@ class PaperOrb:
         with self.lock:
             for sid, p in self.book.s.items():
                 w = self.w[sid]; sp, sq, _ = self.filled((sid, "Sell")); bp, bq, _ = self.filled((sid, "Buy")); last = self.last.get(sid)
+                # 收盤腳: 永豐模擬環境的收盤回報價不可靠 (11-12 鈺創回報 99.1, 實際收盤 92.6; LINE 損益卡因此顯示 −24,775 而結算是 +9,025),
+                # 結算前當作仍持有 (用現價), 結算後用真實收盤價
+                if sid in self.final_buy: bp = self.final_buy[sid]
+                elif self.leg.get(sid, {}).get("exit", {}).get("leg") == "close": bp = None
                 ref = bp or last
                 rows.append(dict(stock_id=sid, name=w["name"], rl=w["rl"], rh=w["rh"], lots=w["lots"], state=p["state"], state_txt=OL.STATE_TXT.get(p["state"], p["state"]),
                                  sell_px=sp, sell_lots=sq, buy_px=bp, last=last, skipped=self.skipped.get(sid, ""),
