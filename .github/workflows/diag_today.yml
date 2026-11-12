@@ -1,6 +1,10 @@
 name: Diag today (signal vs paper live.json)
 on:
   workflow_dispatch:
+    inputs:
+      ids:
+        description: "額外列出的股票代號 (空白分隔)"
+        default: ""
 jobs:
   diag:
     runs-on: ubuntu-latest
@@ -16,4 +20,4 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
       - run: pip install -q -r requirements.txt
-      - run: python3 -W ignore scripts/diag_today.py
+      - run: python3 -W ignore scripts/diag_today.py ${{ github.event.inputs.ids }}
