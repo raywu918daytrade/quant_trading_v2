@@ -43,3 +43,14 @@ if len(x):
 print("模擬 events:"); [print(" ", {k: e.get(k) for k in ["stock_id", "name", "event", "price", "tick_px", "tick_time", "recv_time", "note"]}) for e in P.get("events", [])[:60] if e.get("event") != "FULL" or e.get("stock_id") in ONLY]
 print("訊號 events:"); [print(" ", e) for e in L.get("events", [])[:40]]
 for sid in ONLY: print("模擬原始", sid, pw.get(sid)); print("訊號原始", sid, lw.get(sid))
+# 訊號端現價: watch.last 與 bars (MIS z) 是否有值
+print("訊號 last:", {r["stock_id"]: r.get("last") for r in L.get("watch", []) if r.get("entry_px")})
+bars = L.get("bars") or {}
+print("訊號 bars 根數:", {s: len(v) for s, v in bars.items()}, "例:", {s: v[-2:] for s, v in list(bars.items())[:2]})
+if ONLY:                                     # 直接打一次 MIS, 看 z 欄位
+    import orb_live as OL
+    m = OL.MIS(); mk = {r["stock_id"]: r.get("market_type") for r in L.get("watch", [])}
+    import requests
+    codes = "|".join(f"{'tse' if mk.get(s) == 'twse' else 'otc'}_{s}.tw" for s in ONLY) + "|" + "|".join(f"tse_{s}.tw" for s in ONLY)
+    js = m.s.get(f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={codes}&json=1&delay=0", timeout=10).json()
+    for x in js.get("msgArray", []): print("MIS 原始", {k: x.get(k) for k in ["c", "n", "t", "z", "pz", "o", "h", "l", "y", "v", "tv", "a", "b", "ex"]})
