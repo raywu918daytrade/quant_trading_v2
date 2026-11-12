@@ -503,6 +503,13 @@ def card_notrade(ds, title, reasons, info=None, n_cand=None, extra=""):
     blocks.append(LC.small("✅ 系統正常運作"))
     return LC.card(title, blocks, sub=ds, kind="info", alt=f"{title} {ds}: " + "；".join(reasons) + " (系統正常運作)")
 
+def card_start(ds, info, watch):
+    """09:05 開始監看: 精簡模式下盤中唯一一則, 之後進場 / 停損 / 損益都靠選單查 (選單回覆走 reply API, 不算額度)。"""
+    blocks = [LC.tiles(LC.tile("監看", f"{len(watch)} 檔", "跌破區間低就放空"), LC.tile("大盤跳空", LC.pct(info["mkt_gap"] * 100), f"上漲家數 {info['breadth']*100:.0f}%", LC.color(info["mkt_gap"]))),
+              LC.note("盤中進場 / 停損不再逐筆推播。\n點下方選單「持倉」「損益」隨時查看 (不佔推播額度)。")]
+    return LC.card("🟢 今日開始監看", blocks, sub=f"{ds} 09:05", kind="entry", footer=("📱 今日持倉頁", f"{SITE}/web/today.html"),
+                   alt=f"🟢 {ds} 開始監看 {len(watch)} 檔, 點下方選單「持倉」「損益」查看")
+
 def card_error(where, err, run_name="Live signals"):
     return LC.card("❌ 程式出錯中斷", [LC.kv("時間", f"{now_tw():%Y-%m-%d %H:%M:%S}"), LC.kv("程式", where), LC.note(err[:500]),
                    LC.small(f"GitHub → Actions → {run_name} 看 log")], kind="error",
@@ -713,6 +720,7 @@ def _run(a, line):
     book.bars = Bars()
     for r in s5[s5.stock_id.isin(watch.stock_id)].itertuples(): book.bars.seed(r.stock_id, r.o, r.rh, r.rl, r.z, r.o5_v)
     pub.push(live_state(ds, "監看中", info, book, mem, excl), force=True)
+    if not a.line_all: line.push_async(card_start(ds, info, watch))         # 精簡模式: 每天只推這一則 (或不交易那一則)
     evf = open(SIG / f"{ds}_events.csv", "a", encoding="utf-8")
     new_ev = []
     def log(e):
@@ -738,14 +746,14 @@ def _run(a, line):
             if np.isfinite(r.b1): m["px"] = r.b1
             book.bars.add(r.stock_id, t, r.z, r.v)
         sig = [e for e in new_ev if e["event"] in ("SHORT", "STOP")]
-        if sig: line.push_async(card_events(sig, book, ds))           # 背景送, 不擋下一輪輪詢
+        if sig and a.line_all: line.push_async(card_events(sig, book, ds))           # 背景送, 不擋下一輪輪詢
         for sid in ids:                                    # 12:00 後 WAIT 失效
             if book.s[sid]["state"] == "WAIT" and t >= P["DEADLINE"] + 1: book.s[sid]["state"] = "EXPIRED"
         holding = [s for s, p in book.s.items() if p["state"] == "SHORT"]
         if not reminded and t >= 264 and holding:           # 13:24
             print(f"⏰ 13:24 提醒: 持有 {len(holding)} 檔 {holding}, 13:25 前掛市價買回參加收盤競價"); reminded = True
             if a.notify: notify("收盤回補提醒", f"{len(holding)} 檔: {' '.join(holding)}")
-            line.push_async(card_reminder(holding, book, mem, ds))
+            if a.line_all: line.push_async(card_reminder(holding, book, mem, ds))
             pub.push(live_state(ds, "收盤回補提醒", info, book, mem, excl, note=f"13:25 前掛市價買回 {len(holding)} 檔"), force=True)
         pub.push(live_state(ds, "監看中", info, book, mem, excl), event=bool(new_ev)); new_ev.clear()
         if not book.active() or (not holding and t >= P["DEADLINE"] + 1): break
@@ -763,7 +771,8 @@ def _run(a, line):
     evf.close()
     summarize(book.trades(), ds, SIG, info)
     tr = book.trades()
-    line.flush(); line.push(card_summary(tr, ds, info))
+    line.flush()
+    if a.line_all: line.push(card_summary(tr, ds, info))
     st = live_state(ds, "已結算", info, book, mem, excl)
     (SIG / f"{ds}_chart.json").write_text(json.dumps(_jclean(st), ensure_ascii=False, default=_jdefault), encoding="utf-8")   # 隨 upload_day 上傳, chart.html 看歷史日用
     pub.push(st, force=True); pub.upload_day(ds)
@@ -843,7 +852,8 @@ def main():
     p.add_argument("--capital", type=float, default=3_000_000, help="總資金, 每檔額度 = 資金/10")
     p.add_argument("--poll", type=float, default=10, help="輪詢秒數")
     p.add_argument("--notify", action="store_true", help="macOS 通知 (進場/停損/收盤提醒)")
-    p.add_argument("--line", action="store_true", help="LINE 推播 (進場/停損/收盤提醒/結算; 需環境變數 LINE_CHANNEL_ACCESS_TOKEN、LINE_USER_ID)")
+    p.add_argument("--line", action="store_true", help="LINE 推播 (預設精簡: 每天一則 開始監看 / 不交易 + 出錯; 需環境變數 LINE_CHANNEL_ACCESS_TOKEN、LINE_USER_ID)")
+    p.add_argument("--line-all", action="store_true", help="LINE 也逐筆推 進場 / 停損、13:24 回補提醒、結算 (每天約 10 則, 免費額度每月 200 則)")
     p.add_argument("--no-eligibility", action="store_true", help="不查現沖券賣資格")
     p.add_argument("--force", action="store_true", help="週一或大盤跳空 < -1%% 仍跑 (觀察用)")
     p.add_argument("--now", action="store_true", help="不等 09:02 / 09:05 (測試用)")

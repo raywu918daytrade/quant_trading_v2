@@ -21,7 +21,7 @@ cards = {
     "reminder": OL.card_reminder(["2330"], book, mem, ds), "summary": OL.card_summary(tr, ds, info), "summary_empty": OL.card_summary(tr.iloc[:0], ds, info),
     "notrade": OL.card_notrade(ds, "⛔ 今日不交易", ["大盤平均跳空 -1.20% < -1%"], dict(mkt_gap=-0.012, breadth=0.2), 3),
     "monday": OL.card_notrade(ds, "😴 今日不交易", ["週一, 規則不交易"]), "holiday": OL.card_notrade(ds, "😴 休市 / 非交易日", ["非交易日或休市"], extra="MIS 回傳日期 20261107 ≠ 今天"),
-    "error": OL.card_error("orb_live", "KeyError: 'z'"), "text": OL.LC.from_text("❌ 2026-11-10 09:00 live.yml 失敗 / 中斷\n請看 GitHub Actions log", "error"),
+    "start": OL.card_start(ds, info, tr), "error": OL.card_error("orb_live", "KeyError: 'z'"), "text": OL.LC.from_text("❌ 2026-11-10 09:00 live.yml 失敗 / 中斷\n請看 GitHub Actions log", "error"),
     "fix_close": OL.LC.card("⚠ 收盤價已自動改正", [OL.LC.note("2026-11-10 2330 收盤 1001→1000")], hint="1 筆", kind="warn"),
 }
 json.dumps(cards, ensure_ascii=False, allow_nan=False)        # NaN 混進去會被 LINE 拒收
