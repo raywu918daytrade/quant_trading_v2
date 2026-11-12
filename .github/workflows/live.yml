@@ -1,7 +1,7 @@
 name: Live signals (08:50 ~ 13:35)
 on:
   # 不用 GitHub 自己的 schedule (會延遲且 60 天沒 commit 會停用); 由 cron-job.org 平日台灣 08:50 打 workflow_dispatch (scripts/setup_cronjob.py)。
-  # 腳本自己等到 09:02 抓開盤、09:05 定區間, 盤中每 10 秒輪詢到 13:31 結算; 狀態寫到 HF db/orb/live.json 給網頁讀。
+  # 腳本自己等到 09:02 抓開盤、09:05 定區間, 盤中用永豐 tick 觸發 (MIS 每 10 秒輪詢備援) 到 13:31 結算; 狀態寫到 HF db/orb/live.json 給網頁讀。
   workflow_dispatch:
     inputs:
       force:
@@ -25,7 +25,7 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: requirements.txt
-      - run: pip install -q -r requirements.txt
+      - run: pip install -q -r requirements.txt shioaji   # 訊號端改用永豐 tick (2026-11-12), 只用模擬環境登入收報價
       - name: Refresh D1 (last 3 months) from HF
         run: python3 -W ignore scripts/orb_live.py refresh --months 3 --m1-months 0
       - name: Run live (publish to HF)
@@ -34,9 +34,12 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}   # 沒設這兩個 secret 時只印警告、不推播
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          SINOPAC_API_KEY: ${{ secrets.SINOPAC_API_KEY }}       # 沒設時自動退回 MIS 輪詢
+          SINOPAC_SECRET_KEY: ${{ secrets.SINOPAC_SECRET_KEY }}
         run: |
+          set -o pipefail   # Shioaji 登入時會印含身分證字號的 Session Property 行, 濾掉 (同 paper.yml)
           F=""; [ -n "${{ github.event.inputs.force }}" ] && F="--force"
-          python3 -W ignore scripts/orb_live.py run --publish --line $F
+          python3 -W ignore scripts/orb_live.py run --publish --line $F 2>&1 | grep --line-buffered -v "Session Property"
       - name: LINE alert if the job failed before / outside the run step
         # run 步驟自己出錯時程式已推過 (outcome == failure), 這裡只補: 安裝 / refresh 失敗、逾時或被取消
         if: (failure() || cancelled()) && steps.run.outcome != 'failure'

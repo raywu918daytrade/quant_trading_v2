@@ -18,7 +18,7 @@
   09:05 ~ 12:00 第一次跌破區間低 → 現沖券賣 (每日最多 10 檔, 先跌破先做)。
   反彈突破區間高 → 市價回補 (停損)；否則 13:25 前掛市價參加 13:30 收盤競價回補。
 """
-import argparse, atexit, glob, json, math, os, subprocess, sys, time
+import argparse, atexit, glob, json, math, os, subprocess, sys, threading, time
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -669,6 +669,58 @@ def notify(title, msg):
     try: subprocess.run(["osascript", "-e", f'display notification "{msg}" with title "{title}" sound name "Glass"'], timeout=5)
     except Exception: pass
 
+class TickFeed:
+    """永豐逐筆 tick 驅動訊號 (2026-11-12 起)。MIS 快照約每 2 分鐘才更新、成交價常是 "-",
+    訊號比永豐模擬單晚 1~2 分鐘、價格也是舊的; 改成跟模擬單同一個資料來源。
+    只用模擬環境登入收報價 (paper_orb.connect_simulation_only, 不啟用憑證、不下單)。登入失敗或 tick 斷線時由主迴圈改用 MIS。"""
+    STALE = 120                                          # 這麼多秒沒收到任何 tick 視為斷線
+
+    def __init__(self, book, mem, lock):
+        self.book, self.mem, self.lock = book, mem, lock
+        self.api = None; self.ready = False; self.last_recv = 0.0; self.n = 0
+
+    def start(self, sids):
+        try:
+            import shioaji as sj, paper_orb as PO
+            if not PO.has_keys(): print("沒有 SINOPAC_API_KEY / SINOPAC_SECRET_KEY, 訊號用 MIS 輪詢"); return False
+            self.api = PO.connect_simulation_only(sj)
+            self.api.set_on_tick_stk_v1_callback(self.on_tick)
+            for sid in sids:
+                try: self.api.subscribe(self.api.Contracts.Stocks[sid], quote_type=sj.QuoteType.Tick)
+                except Exception as e: print(f"訂閱 {sid} tick 失敗: {e}")
+            self.ready = True; self.last_recv = time.time()
+            print(f"{now_tw():%H:%M:%S} 已訂閱永豐 tick {len(sids)} 檔, 訊號改由逐筆成交觸發 (MIS 備援)")
+            return True
+        except (Exception, SystemExit) as e:
+            print(f"⚠ 永豐登入 / 訂閱失敗 ({e}), 訊號用 MIS 輪詢"); self.stop(); return False
+
+    def alive(self): return self.ready and time.time() - self.last_recv < self.STALE
+
+    def on_tick(self, *args):
+        tick = args[-1]
+        try:
+            if getattr(tick, "simtrade", False) or getattr(tick, "suspend", False): return
+            sid, px = str(tick.code), float(tick.close)
+            dt = getattr(tick, "datetime", None)
+            dt = (dt.replace(tzinfo=TZ) if dt.tzinfo is None else dt.astimezone(TZ)) if isinstance(dt, datetime) else now_tw()
+            cumv = float(getattr(tick, "total_volume", np.nan) or np.nan)
+            with self.lock:
+                self.last_recv = time.time(); self.n += 1
+                if not self.ready or sid not in self.book.s or not (px > 0): return
+                t = tmin(dt); m = self.mem[sid]
+                m["z"] = px; m["h"] = max(m["h"], px); m["l"] = min(m["l"], px)
+                if self.book.s[sid]["state"] in ("WAIT", "SHORT"): self.book.step(t, sid, px, px, px, px)
+                if getattr(self.book, "bars", None) is not None: self.book.bars.add(sid, t, px, cumv)
+        except Exception as e:
+            print("tick callback error:", e)
+
+    def stop(self):
+        self.ready = False
+        if self.api is not None:
+            try: self.api.logout()
+            except Exception: pass
+            self.api = None
+
 def cmd_run(a):
     """包一層: 程式出錯 / 被中斷時也推一則 LINE, 才知道系統是死是活。sys.exit (非交易日) 不算錯。"""
     line = Line(a.line)
@@ -731,35 +783,52 @@ def _run(a, line):
     book.log = log
     mk = dict(zip(watch.stock_id, watch.market_type))
     reminded = False
+    lock = threading.RLock()
+    feed = TickFeed(book, mem, lock)
+    if len(watch) and not a.mis_only: feed.start(watch.stock_id.tolist())
+    src = None                                           # 目前的資料來源 ("tick" / "MIS"), 切換時印出並推 LINE
     # ---- 盤中監看 ----
     while book.active() and now_tw().hour * 60 + now_tw().minute < 13 * 60 + 30:
         loop_start = time.time(); t = tmin(now_tw())
+        use_tick = feed.alive()
+        now_src = "tick" if use_tick else "MIS"
+        if now_src != src:
+            if src is not None or now_src == "MIS":
+                msg = f"{now_tw():%H:%M:%S} 訊號資料來源 → {'永豐 tick' if use_tick else 'MIS 輪詢 (永豐 tick 未啟用或已斷線)'}"
+                print(("⚠ " if not use_tick else "") + msg)
+                if not a.mis_only: line.push_async(LC.from_text(("⚠ " if not use_tick else "✅ ") + msg, kind="error" if not use_tick else "info"))
+            src = now_src
         ids = book.active()
-        snap = mis.snapshot(ids, [mk[s] for s in ids])
-        for r in snap.itertuples():
-            m = mem[r.stock_id]
-            hi = np.nanmax([r.z, r.h if r.h > m["h"] else np.nan]); lo = np.nanmin([r.z, r.l if r.l < m["l"] else np.nan])
-            last = r.z if np.isfinite(r.z) else m["z"]
-            if np.isfinite(hi) or np.isfinite(lo):
-                book.step(t, r.stock_id, lo if np.isfinite(lo) else np.inf, hi if np.isfinite(hi) else -np.inf, last, last)
-            m["h"] = np.nanmax([m["h"], r.h]); m["l"] = np.nanmin([m["l"], r.l]); m["z"] = last
-            if np.isfinite(r.b1): m["px"] = r.b1
-            book.bars.add(r.stock_id, t, r.z, r.v)
-        sig = [e for e in new_ev if e["event"] in ("SHORT", "STOP")]
-        if sig and a.line_all: line.push_async(card_events(sig, book, ds))           # 背景送, 不擋下一輪輪詢
-        for sid in ids:                                    # 12:00 後 WAIT 失效
-            if book.s[sid]["state"] == "WAIT" and t >= P["DEADLINE"] + 1: book.s[sid]["state"] = "EXPIRED"
-        holding = [s for s, p in book.s.items() if p["state"] == "SHORT"]
-        if not reminded and t >= 264 and holding:           # 13:24
-            print(f"⏰ 13:24 提醒: 持有 {len(holding)} 檔 {holding}, 13:25 前掛市價買回參加收盤競價"); reminded = True
-            if a.notify: notify("收盤回補提醒", f"{len(holding)} 檔: {' '.join(holding)}")
-            if a.line_all: line.push_async(card_reminder(holding, book, mem, ds))
-            pub.push(live_state(ds, "收盤回補提醒", info, book, mem, excl, note=f"13:25 前掛市價買回 {len(holding)} 檔"), force=True)
-        pub.push(live_state(ds, "監看中", info, book, mem, excl), event=bool(new_ev)); new_ev.clear()
+        if not use_tick:                                 # 備援: MIS 快照
+            snap = mis.snapshot(ids, [mk[s] for s in ids])
+            with lock:
+                for r in snap.itertuples():
+                    m = mem[r.stock_id]
+                    hi = np.nanmax([r.z, r.h if r.h > m["h"] else np.nan]); lo = np.nanmin([r.z, r.l if r.l < m["l"] else np.nan])
+                    last = r.z if np.isfinite(r.z) else m["z"]
+                    if np.isfinite(hi) or np.isfinite(lo):
+                        book.step(t, r.stock_id, lo if np.isfinite(lo) else np.inf, hi if np.isfinite(hi) else -np.inf, last, last)
+                    m["h"] = np.nanmax([m["h"], r.h]); m["l"] = np.nanmin([m["l"], r.l]); m["z"] = last
+                    if np.isfinite(r.b1): m["px"] = r.b1
+                    book.bars.add(r.stock_id, t, r.z, r.v)
+        with lock:                                      # tick 執行緒同時在改 book / mem / new_ev
+            sig = [e for e in new_ev if e["event"] in ("SHORT", "STOP")]
+            if sig and a.line_all: line.push_async(card_events(sig, book, ds))           # 背景送, 不擋下一輪輪詢
+            for sid in ids:                                    # 12:00 後 WAIT 失效
+                if book.s[sid]["state"] == "WAIT" and t >= P["DEADLINE"] + 1: book.s[sid]["state"] = "EXPIRED"
+            holding = [s for s, p in book.s.items() if p["state"] == "SHORT"]
+            if not reminded and t >= 264 and holding:           # 13:24
+                print(f"⏰ 13:24 提醒: 持有 {len(holding)} 檔 {holding}, 13:25 前掛市價買回參加收盤競價"); reminded = True
+                if a.notify: notify("收盤回補提醒", f"{len(holding)} 檔: {' '.join(holding)}")
+                if a.line_all: line.push_async(card_reminder(holding, book, mem, ds))
+                pub.push(live_state(ds, "收盤回補提醒", info, book, mem, excl, note=f"13:25 前掛市價買回 {len(holding)} 檔"), force=True)
+            pub.push(live_state(ds, "監看中", info, book, mem, excl), event=bool(new_ev)); new_ev.clear()
         if not book.active() or (not holding and t >= P["DEADLINE"] + 1): break
         took = time.time() - loop_start
         if took > 3 * a.poll: print(f"⚠ {now_tw():%H:%M:%S} 這輪輪詢花了 {took:.0f} 秒 (設定 {a.poll:g} 秒)")   # 11-11 曾因同步上傳 HF 每 2 分鐘卡住一次
-        time.sleep(max(a.poll - took, 1))
+        time.sleep(max((a.tick_poll if use_tick else a.poll) - took, 0.5))
+    with lock: feed.ready = False                        # 13:30 後不再由 tick 觸發; 收盤價照舊用 MIS 收盤競價結果
+    print(f"永豐 tick 共收到 {feed.n} 筆"); feed.stop()
     # ---- 收盤結算 ----
     holding = [s for s, p in book.s.items() if p["state"] == "SHORT"]
     if holding:
@@ -850,7 +919,9 @@ def main():
     p = sp.add_parser("pool"); p.add_argument("--date")
     p = sp.add_parser("run")
     p.add_argument("--capital", type=float, default=3_000_000, help="總資金, 每檔額度 = 資金/10")
-    p.add_argument("--poll", type=float, default=10, help="輪詢秒數")
+    p.add_argument("--poll", type=float, default=10, help="輪詢秒數 (MIS 備援時)")
+    p.add_argument("--tick-poll", type=float, default=2, help="用永豐 tick 時主迴圈 (發布 / LINE / 提醒) 的間隔秒數")
+    p.add_argument("--mis-only", action="store_true", help="不用永豐 tick, 只用 MIS 輪詢 (舊做法)")
     p.add_argument("--notify", action="store_true", help="macOS 通知 (進場/停損/收盤提醒)")
     p.add_argument("--line", action="store_true", help="LINE 推播 (預設精簡: 每天一則 開始監看 / 不交易 + 出錯; 需環境變數 LINE_CHANNEL_ACCESS_TOKEN、LINE_USER_ID)")
     p.add_argument("--line-all", action="store_true", help="LINE 也逐筆推 進場 / 停損、13:24 回補提醒、結算 (每天約 10 則, 免費額度每月 200 則)")
