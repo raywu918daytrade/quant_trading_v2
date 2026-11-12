@@ -223,11 +223,11 @@ class Book:
                     p["state"] = "FULL"; self._ev(t, sid, "FULL", last, p["rl"], "跌破但當日已滿 10 檔"); return
                 p["state"] = "SHORT"; self.n_entered += 1
                 p["entry_t"] = t
-                p["entry_px"] = min(p["rl"], first) if self.mode == "bar" else (last if np.isfinite(last) else p["rl"])
+                p["entry_px"] = min(p["rl"], first) if self.mode == "bar" else (min(p["rl"], last) if np.isfinite(last) else p["rl"])   # MIS z 可能是舊的 (11-12 立碁記成 82.6 > 區間低 80.7), 不高於區間低
                 self._ev(t, sid, "SHORT", p["entry_px"], p["rl"], f"跌破區間低 {p['rl']:g} → 現沖券賣 {p['lots']} 張; 停損 {p['rh']:g}")
             return                                                  # 進場那一段不檢查停損 (與回測一致)
         if p["state"] == "SHORT" and hi > p["rh"]:
-            px = max(p["rh"], first) * (1 + P["STOP_SLIP"]) if self.mode == "bar" else (last if np.isfinite(last) else p["rh"])
+            px = max(p["rh"], first) * (1 + P["STOP_SLIP"]) if self.mode == "bar" else (max(p["rh"], last) if np.isfinite(last) else p["rh"])   # 同上, 停損價不低於區間高
             if self.mode == "bar" and px >= p["fpx"]:
                 px = p["fpx"] * (1 + P["FORCE_SLIP"]); p["forced"] = True
             p["state"] = "STOPPED"; p["exit_t"] = t; p["exit_px"] = px; p["reason"] = "停損 (突破區間高)"
