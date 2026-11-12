@@ -46,7 +46,9 @@ function sigRows(live) {
   });
 }
 function simRows(paper) {
-  return (paper?.positions || []).filter((r) => ok(r.sell_px)).map((r) => {
+  // 已觸發 (state 非 WAIT) 但模擬環境還沒回成交 → 也列出來, 標「送單 待成交」(11-12: 聯一光 / 鈺創 09:05 送單, 09:08 還沒回報成交, 頁面上就像沒下單)
+  return (paper?.positions || []).filter((r) => ok(r.sell_px) || (r.state !== "WAIT" && r.state !== "EXPIRED" && r.state !== "FULL")).map((r) => {
+    if (!ok(r.sell_px)) return { sid: r.stock_id, name: r.name, hold: true, pending: r.skipped ? `未下單 ${r.skipped}` : "送單 待成交", lots: r.lots, entry: r.rl, ref: r.last, rh: r.rh, pnl: null, pct: null };
     const hold = !ok(r.buy_px), ref = hold ? r.last : r.buy_px;
     return { sid: r.stock_id, name: r.name, hold, stop: r.state === "STOPPED", lots: r.sell_lots, entry: +r.sell_px, ref, rh: r.rh, pnl: pnl(+r.sell_px, ref, r.sell_lots), pct: r.pnl_pct };
   });
@@ -69,7 +71,8 @@ function positions(ctx, withClosed) {
   const total = (rs, f = () => true) => rs.filter(f).reduce((a, r) => a + (r.pnl || 0), 0);
   const pick = (rs) => (withClosed ? rs : rs.filter((r) => r.hold));
   const tiles = [tile("即時訊號", withClosed ? total(S) : total(S, (r) => r.hold), withClosed ? `持有 ${S.filter((r) => r.hold).length} / 進場 ${S.length}` : `持有 ${S.filter((r) => r.hold).length} 檔`)];
-  if (paper) tiles.push(tile("永豐模擬單", withClosed ? total(M) : total(M, (r) => r.hold), withClosed ? `持有 ${M.filter((r) => r.hold).length} / 成交 ${M.length}` : `持有 ${M.filter((r) => r.hold).length} 檔`));
+  const nHeld = M.filter((r) => r.hold && !r.pending).length, nWait = M.filter((r) => r.pending).length, wait = nWait ? `　待成交/未下單 ${nWait}` : "";
+  if (paper) tiles.push(tile("永豐模擬單", withClosed ? total(M) : total(M, (r) => r.hold), (withClosed ? `持有 ${nHeld} / 成交 ${M.length - nWait}` : `持有 ${nHeld} 檔`) + wait));
   const blocks = [{ type: "box", layout: "horizontal", spacing: "md", contents: tiles }];
   const sec = (title, rs) => {
     const xs = pick(rs);
@@ -133,7 +136,7 @@ function stockRow(d, r) {
   return { type: "box", layout: "horizontal", margin: "md", action: { type: "uri", label: "K線", uri: chartUrl(d, r.sid) }, contents: [
     { type: "box", layout: "vertical", flex: 7, contents: [
       { type: "text", text: `${r.sid} ${r.name}`, size: "sm", weight: "bold", color: INK },
-      { type: "text", text: `${st} ${f2(r.entry)}→${f2(r.ref)} ${r.lots}張`, size: "xxs", color: INK2 }] },
+      { type: "text", text: r.pending ? `${r.pending}　區間低 ${f2(r.entry)} ${r.lots}張` : `${st} ${f2(r.entry)}→${f2(r.ref)} ${r.lots}張`, size: "xxs", color: INK2, wrap: true }] },
     { type: "box", layout: "vertical", flex: 3, contents: [
       { type: "text", text: yuan(r.pnl), size: "sm", weight: "bold", color: color(r.pnl), align: "end" },
       { type: "text", text: pct(r.pct), size: "xxs", color: color(r.pnl), align: "end" }] }] };

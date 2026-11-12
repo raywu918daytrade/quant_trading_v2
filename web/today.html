@@ -70,9 +70,13 @@ function rowsSig(j) {
   return { held, real, unreal, n: rs.length, html: html || `<div class="empty">${emptyMsg(j)}</div>` };
 }
 function rowsSim(j) {
-  const rs = (j.positions || []).filter((r) => ok(r.sell_px));
+  const rs = (j.positions || []).filter((r) => ok(r.sell_px) || !["WAIT", "EXPIRED", "FULL"].includes(r.state));
   let held = 0, real = 0, unreal = 0;
   const html = rs.map((r) => {
+    if (!ok(r.sell_px)) {     // 已觸發但模擬環境還沒回成交 (或沒下單): 照樣列出, 免得看起來少了幾檔 (不算持有)
+      return `<a class="row" href="${chartLink(j.date, r.stock_id)}"><span class="nm">${r.stock_id} ${r.name}<span class="tag">${r.skipped ? "未下單" : "送單 待成交"}</span></span><span class="r big">–</span>
+      <span class="d">${r.skipped ? r.skipped : `區間低 ${fmt(r.rl)} × ${r.lots} 張`}　停損 ${fmt(r.rh)}</span><span class="r d">現價 ${fmt(r.last)}</span></a>`;
+    }
     const hold = !ok(r.buy_px), ref = hold ? r.last : r.buy_px, p = pnl(+r.sell_px, ref, r.sell_lots);
     if (hold) { held++; unreal += p || 0; } else real += p || 0;
     const tag = hold ? '<span class="tag hold">持有中</span>' : r.state === "STOPPED" ? '<span class="tag stop">已停損</span>' : '<span class="tag">已回補</span>';
