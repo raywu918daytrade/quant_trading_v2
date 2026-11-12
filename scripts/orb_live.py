@@ -280,9 +280,10 @@ class MIS:
                     time.sleep(1)
             for m in js.get("msgArray", []):
                 out.append(dict(stock_id=m.get("c"), o=_f(m.get("o")), h=_f(m.get("h")), l=_f(m.get("l")), z=_f(m.get("z")), y=_f(m.get("y")),
-                                u=_f(m.get("u")), w=_f(m.get("w")), v=_f(m.get("v")), mis_t=m.get("t"), mis_d=m.get("d")))
+                                u=_f(m.get("u")), w=_f(m.get("w")), v=_f(m.get("v")), mis_t=m.get("t"), mis_d=m.get("d"),
+                                b1=_f(str(m.get("b") or "").split("_")[0])))      # 最佳買價: z 常是 "-" (這次快照沒有新成交), 顯示現價時用它補
             if i + batch < len(codes): time.sleep(sleep)
-        df = pd.DataFrame(out, columns=["stock_id", "o", "h", "l", "z", "y", "u", "w", "v", "mis_t", "mis_d"])
+        df = pd.DataFrame(out, columns=["stock_id", "o", "h", "l", "z", "y", "u", "w", "v", "mis_t", "mis_d", "b1"])
         return df[df.stock_id.notna() & (df.stock_id != "")].reset_index(drop=True)
 
     def closes(self, sids, markets, deadline=(13, 36, 0), retry=20):
@@ -549,7 +550,8 @@ def live_state(ds, phase, info=None, book=None, mem=None, excl=None, cand=None, 
     if book is not None:
         rows = []
         for sid, p in book.s.items():
-            last = (mem or {}).get(sid, {}).get("z", np.nan)
+            mm = (mem or {}).get(sid, {}); last = mm.get("z", np.nan)
+            if not np.isfinite(last): last = mm.get("px", np.nan)       # 沒有成交價就用最佳買價 (只影響顯示 / 未實現損益)
             ref = p["exit_px"] if np.isfinite(p["exit_px"]) else last
             pnl = (-(ref / p["entry_px"] - 1) - COST) * 100 if np.isfinite(p["entry_px"]) and np.isfinite(ref) else None
             rows.append(dict(stock_id=sid, name=p["name"], pc=p["pc"], gap=p["gap"], rl=p["rl"], rh=p["rh"], force_px=p["fpx"], lots=p["lots"], state=p["state"], state_txt=STATE_TXT.get(p["state"], p["state"]),
@@ -733,6 +735,7 @@ def _run(a, line):
             if np.isfinite(hi) or np.isfinite(lo):
                 book.step(t, r.stock_id, lo if np.isfinite(lo) else np.inf, hi if np.isfinite(hi) else -np.inf, last, last)
             m["h"] = np.nanmax([m["h"], r.h]); m["l"] = np.nanmin([m["l"], r.l]); m["z"] = last
+            if np.isfinite(r.b1): m["px"] = r.b1
             book.bars.add(r.stock_id, t, r.z, r.v)
         sig = [e for e in new_ev if e["event"] in ("SHORT", "STOP")]
         if sig: line.push_async(card_events(sig, book, ds))           # 背景送, 不擋下一輪輪詢
