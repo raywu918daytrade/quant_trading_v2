@@ -49,7 +49,8 @@ SIMULATION = True             # 安全常數: 改成 False 程式會拒絕執行
 AUCTION_T = (13, 25, 10)      # 收盤集合競價開始後, 剩餘部位以漲停價限價買回
 END_T = (13, 35, 0)
 LIVE_EVERY = 180              # 盤中至少每 3 分鐘上傳一次 live.json
-EVENT_GAP = 120               # 有事件時最快每 2 分鐘上傳一次 (HF 每個 repo 每小時最多 128 個 commit, live / paper / v1 共用)
+EVENT_GAP = 60                # 有事件 (成交回報等) 時最快每 1 分鐘上傳一次; 11-12 成交後 LINE 持倉卡最多要等 2 分鐘才更新。
+                              # HF 每個 repo 每小時最多 128 個 commit (live / paper / v1 共用), 這裡最壞約 60 次/時, 訊號端 ≤30 次/時
 ORDER_WORKERS = 12            # 同時送單的執行緒數 (每日最多 10 檔 + 停損): 多檔同時跌破時並行送出, 不再一張等一張
 
 

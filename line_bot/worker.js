@@ -79,8 +79,9 @@ function positions(ctx, withClosed) {
     blocks.push(sep(), label(title));
     blocks.push(...(xs.length ? xs.map((r) => stockRow(live.date, r)) : [note(withClosed ? "今天沒有進場" : "目前沒有持倉")]));
   };
-  sec("即時訊號", S);
-  if (paper) sec("永豐模擬單", M);
+  const at = (j) => (j?.updated_at ? `　(資料 ${j.updated_at.slice(11, 16)})` : "");   // 兩邊各自約 2~3 分鐘上傳一次, 標出資料時間免得以為是即時
+  sec("即時訊號" + at(live), S);
+  if (paper) sec("永豐模擬單" + at(paper), M);
   if (withClosed) {
     const sumLine = (rs) => `已實現 ${yuan(total(rs, (r) => !r.hold))}　未實現 ${yuan(total(rs, (r) => r.hold))}`;
     blocks.push(sep(), small(`訊號 ${sumLine(S)}` + (paper ? `\n模擬 ${sumLine(M)}` : "")));
