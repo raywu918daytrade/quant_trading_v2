@@ -236,6 +236,23 @@ for slip, rc in [(0, "s_r"), (1, "s_r1")]:
     P(line("全做 (每檔 1/10, 不設上限)", *run(A, ["s_et", "stock_id"], cap=999, rc=rc), rc))
     P(line("全做, 每檔 = 資金/當日檔數 (事後等權攤, 上限參考)", run(A.assign(**{rc: A[rc] / A.nday * 10}), ["s_et"], cap=999, rc=rc)[0], A, rc))
 
+# ---------- 5. 只砍開盤 5 分成交額 / 量比低的 (單一條件, 門檻 = 探索期分位, 名額由後面的單遞補) ----------
+P(""); P("## 5. 砍掉開盤 5 分成交額 (或量比) 低的單, 其餘照先到先做 10 檔")
+P("門檻 = 探索期 (≤2023) 的分位數, 09:05 就知道；被砍的名額由之後跌破的單遞補。")
+for col, nm, fmt in [("f_o5amt", "5 分成交額", lambda v: f"{10**v/1e4:,.0f} 萬"), ("f_vr", "5 分量比", lambda v: f"{v:.1f}%")]:
+    P(""); P(f"### 5{'ab'[col == 'f_vr']}. {nm}")
+    P(""); P("| 門檻 | 被砍筆數 (不設上限) | 被砍的每筆% / 勝率 / 停損% | 被砍的 探索/驗證 每筆% | 被砍的滑 1 檔 |"); P("|---|---|---|---|---|")
+    for qq in [0.1, 0.2, 0.3, 0.5]:
+        t = A.loc[A.exp, col].quantile(qq); z = A[A[col] < t]
+        P(f"| < {fmt(t)} (探索 {int(qq*100)} 分位) | {len(z):,} ({len(z)/len(A)*100:.0f}%) | {z.s_r.mean():.3f} / {(z.s_r > 0).mean()*100:.0f}% / {(z.s_why == '停損').mean()*100:.0f}% | "
+          f"{z[z.exp].s_r.mean():.3f} / {z[~z.exp].s_r.mean():.3f} | {z.s_r1.mean():.3f} |")
+    for slip, rc in [(0, "s_r"), (1, "s_r1")]:
+        P(""); P(f"組合 (滑 {slip} 檔):"); P(""); [P(h) for h in HD]
+        P(line("現行 (不砍)", *run(A, ["s_et", "stock_id"], rc=rc), rc))
+        for qq in [0.1, 0.2, 0.3, 0.5]:
+            t = A.loc[A.exp, col].quantile(qq)
+            P(line(f"砍 {nm} < {fmt(t)} ({int(qq*100)} 分位)", *run(A.assign(kp=A[col] >= t), ["s_et", "stock_id"], keep="kp", rc=rc), rc))
+
 Path(a.out).parent.mkdir(parents=True, exist_ok=True)
 Path(a.out).write_text("\n".join(OUT) + "\n", encoding="utf-8")
 print(f"寫入 {a.out}")
