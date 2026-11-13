@@ -585,7 +585,13 @@ def cmd_run(a):
     if today.dayofweek in OL.P["NO_DOW"] and not a.force:
         no_trade_day(ds, dict(trade_ok=False, reasons=["週一不交易"]), pub, "週一不交易"); return
     elig = None if a.no_eligibility else OL.fetch_eligible(ds)
-    mis = OL.MIS()
+    # ---- 先登入模擬環境 (開盤價、區間、收盤價都用永豐快照; MIS 只當備援, 2026-11-13) ----
+    api = broker = None
+    if has_keys():
+        import shioaji as sj
+        api = connect_simulation_only(sj); broker = SinopacBroker(api, sj)
+    elif a.dry: log("dry: 沒有永豐憑證, 跳過登入 (只驗證選股流程)")
+    mis = OL.Quotes(OL.MIS(), api)
     # ---- 09:02 開盤 ----
     if not a.now: OL.wait_until(9, 2, 0)
     snap = mis.snapshot(pool.stock_id.tolist(), pool.market_type.tolist())
@@ -597,12 +603,7 @@ def cmd_run(a):
     log(f"09:02 開盤: 大盤平均跳空 {info['mkt_gap']*100:+.2f}%；候選 {len(cand)} 檔")
     if not info["trade_ok"] and not a.force:
         no_trade_day(ds, info, pub, "；".join(info["reasons"])); return
-    # ---- 登入模擬環境, 訂閱候選 tick ----
-    api = broker = None
-    if has_keys():
-        import shioaji as sj
-        api = connect_simulation_only(sj); broker = SinopacBroker(api, sj)
-    elif a.dry: log("dry: 沒有永豐憑證, 跳過登入 (只驗證選股流程)")
+    # ---- 訂閱候選 tick ----
     holder = {}
     if api is not None:
         api.set_order_callback(lambda stat, msg: holder["po"].on_order(stat, msg) if "po" in holder else None)
@@ -615,7 +616,6 @@ def cmd_run(a):
     # ---- 09:05 區間 ----
     if not a.now: OL.wait_until(9, 5, 0)
     s5 = mis.snapshot(cand.stock_id.tolist(), cand.market_type.tolist()).rename(columns={"h": "rh", "l": "rl", "u": "lu_live", "v": "o5_v"})
-    s5 = OL.sinopac_range(api, s5)                      # 與訊號端同一份區間 (永豐快照, MIS 落後)
     watch, excl = OL.range_stage(cand, s5[["stock_id", "rh", "rl", "lu_live", "o5_v"]], eligible=elig); info["n_watch"] = len(watch)
     book = OL.Book(watch, "live", capital=a.capital)
     watch["lots"] = watch.stock_id.map(lambda s: book.s[s]["lots"])

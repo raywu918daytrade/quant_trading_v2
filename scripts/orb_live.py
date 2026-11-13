@@ -669,26 +669,55 @@ def notify(title, msg):
     try: subprocess.run(["osascript", "-e", f'display notification "{msg}" with title "{title}" sound name "Glass"'], timeout=5)
     except Exception: pass
 
-def sinopac_range(api, s5):
-    """09:05 區間改用永豐快照的 開 / 高 / 低 覆蓋 MIS 快照 (MIS 落後 40 秒以上, 11-13 濱川: 訊號端 MIS 區間低 104、模擬單幾秒後抓到 103,
-    兩邊進場差了 3 分半)。訊號端與模擬單都呼叫這個函式, 區間就一致。api 為 None 或失敗時原樣回傳。"""
-    if api is None or not len(s5): return s5
-    try:
-        cs = [c for c in (api.Contracts.Stocks[sid] for sid in s5.stock_id) if c is not None]
-        snaps = api.snapshots(cs)
-    except Exception as e:
-        print(f"⚠ 永豐快照失敗 ({e}), 區間用 MIS"); return s5
-    s5 = s5.copy(); diff = []; n = 0
-    for x in snaps:
-        sid = str(x.code); h, l, o = float(x.high or 0), float(x.low or 0), float(x.open or 0)
-        m = s5.stock_id == sid
-        if not (h > 0 and l > 0) or not m.any(): continue
-        old = s5.loc[m].iloc[0]; n += 1
-        if not (abs(old.rh - h) < 1e-9 and abs(old.rl - l) < 1e-9): diff.append(f"{sid} {old.rl:g}~{old.rh:g}→{l:g}~{h:g}")
-        s5.loc[m, "rh"] = h; s5.loc[m, "rl"] = l
-        if o > 0: s5.loc[m, "o"] = o
-    print(f"{now_tw():%H:%M:%S} 區間用永豐快照 {n}/{len(s5)} 檔" + (f"; 與 MIS 不同: {', '.join(diff)}" if diff else "; 與 MIS 相同"))
-    return s5
+class Quotes:
+    """報價來源 (2026-11-13 起): 永豐快照 api.snapshots 優先 (即時), 拿不到才用證交所 MIS (落後 40 秒以上、成交價常是 "-")。
+    snapshot() / closes() 介面與 MIS 相同, 訊號端與模擬單共用。永豐沒登入 (api=None) 就全用 MIS。"""
+    def __init__(self, mis, api=None): self.mis, self.api, self.warned = mis, api, False
+
+    def _sj(self, sids):
+        cs = [c for c in (self.api.Contracts.Stocks[s] for s in sids) if c is not None]
+        ref = {c.code: c for c in cs}; out = []
+        for i in range(0, len(cs), 400):                 # 一次最多 500 檔
+            for x in self.api.snapshots(cs[i:i + 400]):
+                c = ref.get(str(x.code)); ts = pd.Timestamp(int(x.ts))   # 永豐 ts 是「台灣時間當成 UTC」的奈秒
+                traded = float(x.total_volume or 0) > 0
+                f = lambda v: float(v) if (v is not None and float(v) > 0) else np.nan
+                out.append(dict(stock_id=str(x.code), o=f(x.open) if traded else np.nan, h=f(x.high) if traded else np.nan, l=f(x.low) if traded else np.nan,
+                                z=f(x.close) if traded else np.nan, y=f(getattr(c, "reference", None)), u=f(getattr(c, "limit_up", None)), w=f(getattr(c, "limit_down", None)),
+                                v=float(x.total_volume or 0), mis_t=ts.strftime("%H:%M:%S"), mis_d=ts.strftime("%Y%m%d"), b1=f(getattr(x, "buy_price", None))))
+        return pd.DataFrame(out, columns=["stock_id", "o", "h", "l", "z", "y", "u", "w", "v", "mis_t", "mis_d", "b1"])
+
+    def snapshot(self, sids, markets):
+        if self.api is not None:
+            try:
+                df = self._sj(sids)
+                if len(df) >= 0.9 * len(sids): return df
+                miss = [s for s in sids if s not in set(df.stock_id)]
+                if not self.warned: print(f"⚠ 永豐快照缺 {len(miss)} 檔, 用 MIS 補"); self.warned = True
+                mk = dict(zip(sids, markets))
+                return pd.concat([df, self.mis.snapshot(miss, [mk[s] for s in miss])], ignore_index=True)
+            except Exception as e:
+                print(f"⚠ 永豐快照失敗 ({e}), 這次用 MIS")
+        return self.mis.snapshot(sids, markets)
+
+    def closes(self, sids, markets, deadline=(13, 36, 0), retry=20):
+        """收盤價: 只接受成交時間 ≥ 13:30:00 的價 (收盤集合競價結果)。永豐優先, 到 deadline 還缺的用 MIS。"""
+        if self.api is None: return self.mis.closes(sids, markets, deadline, retry)
+        got = {}; end = now_tw().replace(hour=deadline[0], minute=deadline[1], second=deadline[2], microsecond=0)
+        while True:
+            todo = [s for s in sids if s not in got]
+            try:
+                for r in self._sj(todo).itertuples():
+                    if np.isfinite(r.z) and r.mis_t >= "13:30:00" and r.mis_d == now_tw().strftime("%Y%m%d"): got[r.stock_id] = float(r.z)
+            except Exception as e: print(f"⚠ 永豐收盤快照失敗 ({e})")
+            todo = [s for s in sids if s not in got]
+            if not todo or now_tw() >= end: break
+            print(f"收盤價尚未更新 ({len(todo)} 檔: {' '.join(todo)}), {retry} 秒後重抓"); time.sleep(retry)
+        if todo:
+            mk = dict(zip(sids, markets)); print(f"⚠ 永豐仍缺收盤價: {' '.join(todo)}, 改用 MIS")
+            got.update(self.mis.closes(todo, [mk[s] for s in todo], deadline=(now_tw().hour, now_tw().minute, now_tw().second), retry=retry))
+        return got
+
 
 class TickFeed:
     """永豐逐筆 tick 驅動訊號 (2026-11-12 起)。MIS 快照約每 2 分鐘才更新、成交價常是 "-",
@@ -770,7 +799,10 @@ def _run(a, line):
         line.push(card_notrade(ds, "😴 今日不交易", ["週一, 規則不交易"]))
         pub.push(live_state(ds, "不交易", note="週一不交易"), force=True); return
     elig = None if a.no_eligibility else fetch_eligible(ds)
-    mis = MIS()
+    feed = TickFeed(None, {}, threading.RLock())
+    if not a.mis_only: feed.login()                      # 08:50 先登入永豐: 開盤價、區間、tick、收盤價都用永豐, MIS 只當備援
+    mis = Quotes(MIS(), feed.api)
+    print("報價來源: " + ("永豐 (MIS 備援)" if feed.api is not None else "MIS (永豐未登入)"))
     # ---- 09:02 開盤價 / 大盤跳空 ----
     if not a.now: wait_until(9, 2, 0)
     snap = mis.snapshot(pool.stock_id.tolist(), pool.market_type.tolist())
@@ -789,11 +821,8 @@ def _run(a, line):
             pub.push(live_state(ds, "不交易", info, cand=cand, note="；".join(info["reasons"])), force=True); pub.upload_day(ds); return
     pub.push(live_state(ds, "等待 09:05", info, cand=cand), force=True)
     # ---- 09:05 區間 ----
-    feed = TickFeed(None, {}, threading.RLock())
-    if not a.mis_only: feed.login()                      # 先登入: 09:05 區間要用永豐快照
     if not a.now: wait_until(9, 5, 0)
     s5 = mis.snapshot(cand.stock_id.tolist(), cand.market_type.tolist()).rename(columns={"h": "rh", "l": "rl", "u": "lu_live", "v": "o5_v"})
-    s5 = sinopac_range(feed.api, s5)
     watch, excl = range_stage(cand, s5[["stock_id", "rh", "rl", "lu_live", "o5_v"]], eligible=elig)
     info["n_watch"] = len(watch)
     book = Book(watch, "live", capital=a.capital, log=None)
