@@ -29,7 +29,7 @@ A = S[(S.dv20 >= 3e8) & (S.atr20 >= 0.03) & (S.pc <= 300) & (S.gap >= 0.02) & (S
 A["exp"] = A.date <= EXPLORE_END
 
 # ---- 融資融券 ----
-M = pd.concat([pd.read_parquet(p) for p in sorted(CH.glob("margin_*.parquet"))], ignore_index=True)
+M = pd.concat([pd.read_parquet(p).assign(mkt=p.name.split("_")[1]) for p in sorted(CH.glob("margin_*.parquet"))], ignore_index=True)
 M["date"] = pd.to_datetime(M.date); M["stock_id"] = M.stock_id.astype(str)
 M = M.drop_duplicates(["stock_id", "date"], keep="last").sort_values(["stock_id", "date"]).reset_index(drop=True)
 P(f"<!-- 融資融券 {len(M):,} 列, {M.date.min().date()} ~ {M.date.max().date()}, {M.stock_id.nunique()} 檔 -->")
@@ -41,7 +41,17 @@ M["sb5"] = g.sb.shift(5); M["mb5"] = g.mb.shift(5); M["sb1"] = g.sb.shift(1)
 # 未來 1~7 個交易日內出現停止融券 (且今天還沒停) → 回補壓力窗口
 fut = pd.concat([g.stop_short.shift(-k) for k in range(1, 8)], axis=1).fillna(False).astype(bool).any(axis=1)
 M["pre_stop"] = fut & ~M.stop_short
-mk = M.groupby("date").mb.sum(); mk = (mk / mk.shift(5) - 1) * 100
+# 大盤融資: 上市、上櫃都有資料的日子才算 (缺一邊會造成假的大減)
+mkp = M.groupby(["date", "mkt"]).mb.sum().unstack()
+print("每日檔數 (上市/上櫃) 中位數:", M.groupby(["date", "mkt"]).size().unstack().median().to_dict(),
+      "缺一邊的日子:", int(mkp.isna().any(axis=1).sum()), flush=True)
+mkp = mkp.dropna()
+for c in mkp.columns:   # 單邊單日跳動 >15% 視為資料異常
+    bad = (mkp[c] / mkp[c].shift(1) - 1).abs() > 0.15
+    if bad.any(): print(f"{c} 單日融資總額跳動 >15%:", list(mkp.index[bad].astype(str)), flush=True)
+mk = mkp.sum(axis=1); mk = (mk / mk.shift(5) - 1) * 100
+print("大盤融資 5 日增減分位:", mk.quantile([0.01, 0.05, 0.2, 0.5, 0.8, 0.95, 0.99]).round(2).to_dict(), flush=True)
+print("5 日減 ≥3% 的日子:", list(mk.index[mk <= -3].strftime("%Y-%m-%d")), flush=True)
 M = M.rename(columns={"date": "mdate"})
 
 A = A.sort_values("date")
