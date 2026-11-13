@@ -669,6 +669,27 @@ def notify(title, msg):
     try: subprocess.run(["osascript", "-e", f'display notification "{msg}" with title "{title}" sound name "Glass"'], timeout=5)
     except Exception: pass
 
+def sinopac_range(api, s5):
+    """09:05 區間改用永豐快照的 開 / 高 / 低 覆蓋 MIS 快照 (MIS 落後 40 秒以上, 11-13 濱川: 訊號端 MIS 區間低 104、模擬單幾秒後抓到 103,
+    兩邊進場差了 3 分半)。訊號端與模擬單都呼叫這個函式, 區間就一致。api 為 None 或失敗時原樣回傳。"""
+    if api is None or not len(s5): return s5
+    try:
+        cs = [c for c in (api.Contracts.Stocks[sid] for sid in s5.stock_id) if c is not None]
+        snaps = api.snapshots(cs)
+    except Exception as e:
+        print(f"⚠ 永豐快照失敗 ({e}), 區間用 MIS"); return s5
+    s5 = s5.copy(); diff = []; n = 0
+    for x in snaps:
+        sid = str(x.code); h, l, o = float(x.high or 0), float(x.low or 0), float(x.open or 0)
+        m = s5.stock_id == sid
+        if not (h > 0 and l > 0) or not m.any(): continue
+        old = s5.loc[m].iloc[0]; n += 1
+        if not (abs(old.rh - h) < 1e-9 and abs(old.rl - l) < 1e-9): diff.append(f"{sid} {old.rl:g}~{old.rh:g}→{l:g}~{h:g}")
+        s5.loc[m, "rh"] = h; s5.loc[m, "rl"] = l
+        if o > 0: s5.loc[m, "o"] = o
+    print(f"{now_tw():%H:%M:%S} 區間用永豐快照 {n}/{len(s5)} 檔" + (f"; 與 MIS 不同: {', '.join(diff)}" if diff else "; 與 MIS 相同"))
+    return s5
+
 class TickFeed:
     """永豐逐筆 tick 驅動訊號 (2026-11-12 起)。MIS 快照約每 2 分鐘才更新、成交價常是 "-",
     訊號比永豐模擬單晚 1~2 分鐘、價格也是舊的; 改成跟模擬單同一個資料來源。
@@ -679,11 +700,20 @@ class TickFeed:
         self.book, self.mem, self.lock = book, mem, lock
         self.api = None; self.ready = False; self.last_recv = 0.0; self.n = 0
 
-    def start(self, sids):
+    def login(self):
+        """09:02 先登入 (09:05 定區間要用永豐快照); 失敗回 False, 之後全用 MIS。"""
+        if self.api is not None: return True
         try:
             import shioaji as sj, paper_orb as PO
             if not PO.has_keys(): print("沒有 SINOPAC_API_KEY / SINOPAC_SECRET_KEY, 訊號用 MIS 輪詢"); return False
-            self.api = PO.connect_simulation_only(sj)
+            self.api = PO.connect_simulation_only(sj); return True
+        except (Exception, SystemExit) as e:
+            print(f"⚠ 永豐登入失敗 ({e}), 訊號用 MIS"); self.stop(); return False
+
+    def start(self, sids):
+        try:
+            import shioaji as sj
+            if not self.login(): return False
             self.api.set_on_tick_stk_v1_callback(self.on_tick)
             for sid in sids:
                 try: self.api.subscribe(self.api.Contracts.Stocks[sid], quote_type=sj.QuoteType.Tick)
@@ -759,8 +789,11 @@ def _run(a, line):
             pub.push(live_state(ds, "不交易", info, cand=cand, note="；".join(info["reasons"])), force=True); pub.upload_day(ds); return
     pub.push(live_state(ds, "等待 09:05", info, cand=cand), force=True)
     # ---- 09:05 區間 ----
+    feed = TickFeed(None, {}, threading.RLock())
+    if not a.mis_only: feed.login()                      # 先登入: 09:05 區間要用永豐快照
     if not a.now: wait_until(9, 5, 0)
     s5 = mis.snapshot(cand.stock_id.tolist(), cand.market_type.tolist()).rename(columns={"h": "rh", "l": "rl", "u": "lu_live", "v": "o5_v"})
+    s5 = sinopac_range(feed.api, s5)
     watch, excl = range_stage(cand, s5[["stock_id", "rh", "rl", "lu_live", "o5_v"]], eligible=elig)
     info["n_watch"] = len(watch)
     book = Book(watch, "live", capital=a.capital, log=None)
@@ -783,9 +816,9 @@ def _run(a, line):
     book.log = log
     mk = dict(zip(watch.stock_id, watch.market_type))
     reminded = False
-    lock = threading.RLock()
-    feed = TickFeed(book, mem, lock)
+    lock = feed.lock; feed.book, feed.mem = book, mem
     if len(watch) and not a.mis_only: feed.start(watch.stock_id.tolist())
+    elif feed.api is not None: feed.stop()
     src = None                                           # 目前的資料來源 ("tick" / "MIS"), 切換時印出並推 LINE
     # ---- 盤中監看 ----
     while book.active() and now_tw().hour * 60 + now_tw().minute < 13 * 60 + 30:
