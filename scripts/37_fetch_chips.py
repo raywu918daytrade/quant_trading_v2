@@ -200,6 +200,7 @@ def run_mtx(start, end):
     if not len(old) or old.date.min() > str(start + timedelta(40)) or a.test:   # 期交所抓不到的早期 → FinMind
         fm = mtx_finmind(start, end); fm["src"] = "finmind"; parts.insert(0, fm)
     m = pd.concat(parts, ignore_index=True)
+    if "inst_net" not in m.columns: print("[MTX] 沒抓到資料", flush=True); return
     m["date"] = m.date.astype(str).str[:10]
     m = m.dropna(subset=["inst_net", "oi_all"]).drop_duplicates("date", keep="last").sort_values("date")
     m.to_parquet(p, index=False); print(f"[MTX] 共 {len(m)} 日, 來源 {m.src.value_counts().to_dict()}", flush=True)
