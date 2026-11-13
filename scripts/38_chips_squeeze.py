@@ -137,10 +137,9 @@ for f, lab in [("ok_sr20", "券資比≥20%"), ("ok_sr30", "券資比≥30%"), (
     P(port(X, f, keep_only=True, name=f"跳過「{lab}」(名額遞補)"))
     P(port(X, f, w_on=1.0, w_off=0.5, name=f"「{lab}」改 0.5 格"))
 # 散戶多空比: 日層級
-q = X.groupby("date").rr.first()
 lo_, hi_ = np.nanquantile(T.rr, [0.2, 0.8])
-for lab, cond in [(f"散戶多空比 ≥ {hi_:.1f}% (前 20% 偏多) 當天不做", lambda r: ~(r >= hi_)), (f"散戶多空比 ≤ {lo_:.1f}% (前 20% 偏空) 當天不做", lambda r: ~(r <= lo_))]:
-    X["ok_rr"] = cond(X.rr).fillna(True) if hasattr(cond(X.rr), "fillna") else cond(X.rr)
+for lab, ok in [(f"散戶多空比 ≥ {hi_:.1f}% (前 20% 偏多) 當天不做", ~(X.rr >= hi_)), (f"散戶多空比 ≤ {lo_:.1f}% (前 20% 偏空) 當天不做", ~(X.rr <= lo_))]:
+    X["ok_rr"] = ok
     P(port(X, "ok_rr", keep_only=True, name=lab))
 P("")
 P("注意: 「跳過」= 該筆不做, 當天名額讓給後面跌破的股票。0.5 格版本總曝險較低, 比 Sharpe 較公平。")

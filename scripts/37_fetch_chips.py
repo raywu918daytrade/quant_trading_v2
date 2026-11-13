@@ -156,6 +156,33 @@ def taifex_month(s, e):
     m["date"] = pd.to_datetime(m.date.astype(str).str.strip()).dt.strftime("%Y-%m-%d")
     return m
 
+def finmind(dataset, s, e):
+    r = get("https://api.finmindtrade.com/api/v4/data", params={"dataset": dataset, "data_id": "MTX", "start_date": str(s), "end_date": str(e)})
+    if r is None: return None
+    j = r.json()
+    if j.get("status") != 200: print(f"  FinMind {dataset}: {j.get('msg')}", flush=True); return None
+    return pd.DataFrame(j.get("data", []))
+
+def mtx_finmind(start, end):
+    """期交所下載頁只給近 3 年, 更早的用 FinMind (免 token, 每年一次請求)。"""
+    parts = []
+    for y in range(start.year, end.year + 1):
+        s, e = max(start, date(y, 1, 1)), min(end, date(y, 12, 31))
+        I = finmind("TaiwanFuturesInstitutionalInvestors", s, e); time.sleep(4)
+        D = finmind("TaiwanFuturesDaily", s, e); time.sleep(4)
+        if I is None or D is None or not len(I) or not len(D): print(f"[MTX/FinMind] {y} 失敗", flush=True); continue
+        if a.test: print("FinMind inst", list(I.columns), I.head(3).values.tolist(), "\nFinMind daily", list(D.columns), D.head(3).values.tolist(), flush=True)
+        I["net"] = I.long_open_interest_balance_volume - I.short_open_interest_balance_volume
+        inst = I.groupby("date").agg(inst_net=("net", "sum"), inst_long=("long_open_interest_balance_volume", "sum"),
+                                     inst_short=("short_open_interest_balance_volume", "sum")).reset_index()
+        if "trading_session" in D.columns: D = D[D.trading_session.astype(str) == "position"]
+        D = D[~D.contract_date.astype(str).str.contains("/")]
+        tot = D.groupby("date").open_interest.sum().rename("oi_all").reset_index()
+        m = inst.merge(tot, on="date", how="outer"); parts.append(m)
+        print(f"[MTX/FinMind] {y} {len(m)} 日", flush=True)
+        if a.test: break
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["date"])
+
 def run_mtx(start, end):
     p = OUT / "mtx.parquet"
     old = pd.read_parquet(p) if p.exists() else pd.DataFrame(columns=["date"])
@@ -166,28 +193,29 @@ def run_mtx(start, end):
         if f"{s:%Y-%m}" not in have or s.year == end.year and s.month == end.month:
             x = taifex_month(s, e)
             print(f"[MTX] {s:%Y-%m} {'失敗' if x is None else len(x)}", flush=True)
-            if x is not None and len(x): parts.append(x)
+            if x is not None and len(x): x["src"] = "taifex"; parts.append(x)
             time.sleep(3)
             if a.test: break
         s = (pd.Timestamp(s) + pd.offsets.MonthBegin(1)).date()
-    m = pd.concat(parts, ignore_index=True).drop_duplicates("date", keep="last").sort_values("date")
-    m.to_parquet(p, index=False); print(f"[MTX] 共 {len(m)} 日", flush=True)
+    if not len(old) or old.date.min() > str(start + timedelta(40)) or a.test:   # 期交所抓不到的早期 → FinMind
+        fm = mtx_finmind(start, end); fm["src"] = "finmind"; parts.insert(0, fm)
+    m = pd.concat(parts, ignore_index=True)
+    m["date"] = m.date.astype(str).str[:10]
+    m = m.dropna(subset=["inst_net", "oi_all"]).drop_duplicates("date", keep="last").sort_values("date")
+    m.to_parquet(p, index=False); print(f"[MTX] 共 {len(m)} 日, 來源 {m.src.value_counts().to_dict()}", flush=True)
+    both = pd.concat(parts, ignore_index=True); both["date"] = both.date.astype(str).str[:10]
+    ov = both[both.src == "finmind"].merge(both[both.src == "taifex"], on="date", suffixes=("_fm", "_tx"))
+    if len(ov): print(f"[MTX] 兩來源重疊 {len(ov)} 日, 法人淨額相同 {(ov.inst_net_fm == ov.inst_net_tx).mean()*100:.0f}%, 全市場未平倉相同 {(ov.oi_all_fm == ov.oi_all_tx).mean()*100:.0f}%", flush=True)
 
 start, end = date.fromisoformat(a.start), date.fromisoformat(a.end)
 days = [start + timedelta(i) for i in range((end - start).days + 1)]
 days = [d for d in days if d.weekday() < 5]
 if a.test:
-    import re
-    for lab, data in [("2024-01", {"queryStartDate": "2024/01/01", "queryEndDate": "2024/01/31", "commodityId": "MXF"}),
-                      ("2024-01+first", {"firstDate": "2023/11/13 00:00", "lastDate": "2026/11/13 00:00", "queryStartDate": "2024/01/01", "queryEndDate": "2024/01/31", "commodityId": "MXF"}),
-                      ("2019-12", {"queryStartDate": "2019/12/01", "queryEndDate": "2019/12/31", "commodityId": "MXF"}),
-                      ("2026-10", {"queryStartDate": "2026/10/01", "queryEndDate": "2026/10/31", "commodityId": "MXF"})]:
-        r = get("https://www.taifex.com.tw/cht/3/futContractsDateDown", "POST", data=data)
-        t = r.content.decode("big5", "ignore") if r is not None else ""
-        txt = re.sub(r"<[^>]+>", " ", t); txt = re.sub(r"\s+", " ", txt)
-        print("TEST", lab, len(t), t[:300].replace("\n", " | ") if not t.startswith("<") else [m for m in re.findall(r"[^ ]*(?:錯誤|不可|區間|查無|日期|超過)[^ ]*", txt)][:20], flush=True)
-        time.sleep(2)
     days = [date(2025, 9, 10)]
+if a.test:   # 期交所與 FinMind 同一個月對照
+    x = taifex_month(date(2026, 10, 1), date(2026, 10, 31)); f = mtx_finmind(date(2026, 10, 1), date(2026, 10, 31))
+    print(x.merge(f, on="date", suffixes=("_tx", "_fm")).to_string(), flush=True)
+    end = start
 th = [threading.Thread(target=run_margin, args=("twse", twse, days, 3.2)),
       threading.Thread(target=run_margin, args=("tpex", tpex, days, 2.0)),
       threading.Thread(target=run_mtx, args=(start, end))]
