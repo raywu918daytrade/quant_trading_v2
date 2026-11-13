@@ -176,7 +176,18 @@ def run_mtx(start, end):
 start, end = date.fromisoformat(a.start), date.fromisoformat(a.end)
 days = [start + timedelta(i) for i in range((end - start).days + 1)]
 days = [d for d in days if d.weekday() < 5]
-if a.test: days = [date(2020, 3, 5), date(2023, 6, 6), date(2025, 9, 10)]
+if a.test:
+    import re
+    for lab, data in [("2024-01", {"queryStartDate": "2024/01/01", "queryEndDate": "2024/01/31", "commodityId": "MXF"}),
+                      ("2024-01+first", {"firstDate": "2023/11/13 00:00", "lastDate": "2026/11/13 00:00", "queryStartDate": "2024/01/01", "queryEndDate": "2024/01/31", "commodityId": "MXF"}),
+                      ("2019-12", {"queryStartDate": "2019/12/01", "queryEndDate": "2019/12/31", "commodityId": "MXF"}),
+                      ("2026-10", {"queryStartDate": "2026/10/01", "queryEndDate": "2026/10/31", "commodityId": "MXF"})]:
+        r = get("https://www.taifex.com.tw/cht/3/futContractsDateDown", "POST", data=data)
+        t = r.content.decode("big5", "ignore") if r is not None else ""
+        txt = re.sub(r"<[^>]+>", " ", t); txt = re.sub(r"\s+", " ", txt)
+        print("TEST", lab, len(t), t[:300].replace("\n", " | ") if not t.startswith("<") else [m for m in re.findall(r"[^ ]*(?:錯誤|不可|區間|查無|日期|超過)[^ ]*", txt)][:20], flush=True)
+        time.sleep(2)
+    days = [date(2025, 9, 10)]
 th = [threading.Thread(target=run_margin, args=("twse", twse, days, 3.2)),
       threading.Thread(target=run_margin, args=("tpex", tpex, days, 2.0)),
       threading.Thread(target=run_mtx, args=(start, end))]
