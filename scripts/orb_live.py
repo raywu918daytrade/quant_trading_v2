@@ -419,7 +419,7 @@ class Line:
         """msg = line_card.card(...) 組好的 Flex 卡片, 或純文字 (自動轉成卡片: 第一行標題)。
         LINE 拒收 Flex (400) 時改送 altText 純文字, 確保訊息一定送得到。"""
         if not self.enabled: return False
-        if isinstance(msg, str): msg = LC.from_text(msg, kind="error" if msg.startswith("❌") else "info")
+        if isinstance(msg, str): msg = LC.from_text(msg, kind="error" if msg.startswith("❌") else "warn" if msg.startswith("⚠") else "info")
         r = self._post([msg])
         if r is not None: return r
         return bool(self._post([{"type": "text", "text": msg.get("altText", "")[:5000] or "(LINE 卡片格式錯誤)"}]))
@@ -509,6 +509,14 @@ def card_start(ds, info, watch):
               LC.note("進場會推通知; 停損、損益不推。\n點下方選單「持倉」「損益」隨時查看 (不佔推播額度)。")]
     return LC.card("🟢 今日開始監看", blocks, sub=f"{ds} 09:05", kind="entry", footer=("📱 今日持倉頁", f"{SITE}/web/today.html"),
                    alt=f"🟢 {ds} 開始監看 {len(watch)} 檔, 點下方選單「持倉」「損益」查看")
+
+def card_src(use_tick):
+    """訊號資料來源切換 (永豐 tick ↔ MIS 輪詢)。"""
+    if use_tick: return LC.alert("✅ 訊號恢復永豐 tick", "永豐逐筆 tick 已恢復", "訊號回到逐筆判斷。", kind="ok")
+    return LC.alert("⚠ 訊號改用 MIS 輪詢", "永豐 tick 未啟用或已斷線", "訊號照常, 改成每 10 秒查一次證交所 MIS, 進場 / 停損價可能和逐筆差一點。")
+
+def card_paper_err(what, e=None, impact="訊號照常; 模擬單請看網頁或 GitHub Actions log。", title="❌ 模擬單出錯"):
+    return LC.alert(title, what, impact, kind="error", detail=f"{type(e).__name__}: {str(e)[:200]}" if e is not None else "")
 
 def card_error(where, err, run_name="Live signals"):
     return LC.card("❌ 程式出錯中斷", [LC.kv("時間", f"{now_tw():%Y-%m-%d %H:%M:%S}"), LC.kv("程式", where), LC.note(err[:500]),
@@ -855,7 +863,8 @@ def _run(a, line):
     print("報價來源: " + ("永豐 (MIS 備援)" if feed.api is not None else "MIS (永豐未登入)"))
     if ppub and feed.api is None:                        # 訊號照跑 (MIS), 模擬單今天停
         msg = "永豐模擬環境未登入, 今天不送模擬單 (訊號照常)"; print("⚠ " + msg)
-        line.push_async(LC.from_text("❌ " + msg, kind="error")); ppub.live(dict(date=ds, phase="未啟動", note=msg), force=True); ppub = None
+        line.push_async(card_paper_err("永豐模擬環境未登入", impact="訊號照常 (改用 MIS 報價), 今天不送模擬單。", title="❌ 今天沒有模擬單"))
+        ppub.live(dict(date=ds, phase="未啟動", note=msg), force=True); ppub = None
     # ---- 09:02 開盤價 / 大盤跳空 ----
     if not a.now: wait_until(9, 2, 0)
     snap = mis.snapshot(pool.stock_id.tolist(), pool.market_type.tolist())
@@ -914,7 +923,7 @@ def _run(a, line):
             po_.start(); po_.ready = True; po = po_; feed.po = po; a._po = po      # a._po: cmd_run 出錯中斷時用來回補模擬部位
         except Exception as e:
             msg = f"模擬單啟動失敗, 今天不送模擬單 (訊號照常): {type(e).__name__}: {str(e)[:200]}"; print("⚠ " + msg)
-            line.push_async(LC.from_text("❌ " + msg, kind="error"))
+            line.push_async(card_paper_err("模擬單啟動失敗", e, "訊號照常, 今天不送模擬單。", "❌ 今天沒有模擬單"))
             try: ppub.live(dict(date=ds, phase="未啟動", note=msg), force=True)
             except Exception: pass
             po = None; ppub = None
@@ -930,7 +939,7 @@ def _run(a, line):
             try: return f()
             except Exception as e:
                 pt["err"] += 1; print(f"⚠ 模擬單{what}出錯 ({pt['err']}): {type(e).__name__}: {e}")
-                if pt["err"] == 1 or always_line: line.push_async(LC.from_text(f"❌ 模擬單{what}出錯 (訊號照常): {type(e).__name__}: {str(e)[:200]}", kind="error"))
+                if pt["err"] == 1 or always_line: line.push_async(card_paper_err(f"模擬單{what}出錯", e))
         if not po.closing and now_tw() >= t_auc:          # 收盤回補最優先, 不被下面任何一步的錯誤擋住
             def auction():
                 try: po.sync_deals()
@@ -961,7 +970,7 @@ def _run(a, line):
             if src is not None or now_src == "MIS":
                 msg = f"{now_tw():%H:%M:%S} 訊號資料來源 → {'永豐 tick' if use_tick else 'MIS 輪詢 (永豐 tick 未啟用或已斷線)'}"
                 print(("⚠ " if not use_tick else "") + msg)
-                if not a.mis_only: line.push_async(LC.from_text(("⚠ " if not use_tick else "✅ ") + msg, kind="error" if not use_tick else "info"))
+                if not a.mis_only and (not use_tick or feed.alive()): line.push_async(card_src(use_tick))   # 13:25 後強制算 tick 不是真的恢復, 不推
             src = now_src
         ids = book.active()
         if not use_tick:                                 # 備援: MIS 快照
@@ -1019,7 +1028,7 @@ def _run(a, line):
     if ppub:
         try: _paper_finish(PO, po, ppub, paper_step, paper_state, mis, ds, info, watch, mk)
         except Exception as e:
-            print(f"⚠ 模擬單結算出錯: {type(e).__name__}: {e}"); line.push(LC.from_text(f"❌ 模擬單結算出錯: {type(e).__name__}: {str(e)[:200]}", kind="error"))
+            print(f"⚠ 模擬單結算出錯: {type(e).__name__}: {e}"); line.push(card_paper_err("模擬單收盤結算失敗", e, "訊號紀錄已上傳不受影響; 模擬單今日損益可能缺漏。", "❌ 模擬單結算出錯"))
     feed.stop()                                          # 收盤價抓完、模擬單結算完才登出永豐
 
 def _paper_no_trade(PO, ppub, ds, info, note):

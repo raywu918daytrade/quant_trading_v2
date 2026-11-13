@@ -22,6 +22,9 @@ cards = {
     "notrade": OL.card_notrade(ds, "⛔ 今日不交易", ["大盤平均跳空 -1.20% < -1%"], dict(mkt_gap=-0.012, breadth=0.2), 3),
     "monday": OL.card_notrade(ds, "😴 今日不交易", ["週一, 規則不交易"]), "holiday": OL.card_notrade(ds, "😴 休市 / 非交易日", ["非交易日或休市"], extra="MIS 回傳日期 20261107 ≠ 今天"),
     "start": OL.card_start(ds, info, tr), "error": OL.card_error("orb_live", "KeyError: 'z'"), "text": OL.LC.from_text("❌ 2026-11-10 09:00 live.yml 失敗 / 中斷\n請看 GitHub Actions log", "error"),
+    "src_mis": OL.card_src(False), "src_tick": OL.card_src(True),
+    "paper_err": OL.card_paper_err("模擬單補單出錯", KeyError("x")), "paper_login": OL.card_paper_err("永豐模擬環境未登入", title="❌ 今天沒有模擬單"),
+    "long_text": OL.LC.from_text("⚠ 13:27:02 訊號資料來源 → MIS 輪詢 (永豐 tick 未啟用或已斷線)", "warn"),
     "fix_close": OL.LC.card("⚠ 收盤價已自動改正", [OL.LC.note("2026-11-10 2330 收盤 1001→1000")], hint="1 筆", kind="warn"),
 }
 json.dumps(cards, ensure_ascii=False, allow_nan=False)        # NaN 混進去會被 LINE 拒收

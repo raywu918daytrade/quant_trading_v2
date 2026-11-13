@@ -146,7 +146,7 @@ function stockRow(d, r) {
 function card({ title, sub = "", blocks, footer, hint }) {
   const bubble = { type: "bubble", size: "mega",
     header: { type: "box", layout: "vertical", paddingBottom: "6px", contents: [
-      { type: "box", layout: "horizontal", contents: [{ type: "text", text: title, weight: "bold", size: "md", color: INK, flex: 0 }, ...(hint ? [{ type: "text", text: hint, size: "xxs", color: INK2, align: "end", gravity: "center" }] : [])] },
+      { type: "box", layout: "horizontal", contents: [{ type: "text", text: title, weight: "bold", size: "md", color: INK, flex: 1, wrap: true }, ...(hint ? [{ type: "text", text: hint, size: "xxs", color: INK2, align: "end", gravity: "center", flex: 0 }] : [])] },
       ...(sub ? [{ type: "text", text: sub, size: "xxs", color: INK2 }] : [])] },
     body: { type: "box", layout: "vertical", paddingTop: "0px", contents: blocks } };
   if (footer) bubble.footer = { type: "box", layout: "vertical", paddingTop: "0px", contents: [{ type: "button", style: "link", height: "sm", action: { type: "uri", label: footer[0], uri: footer[1] } }] };
