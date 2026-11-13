@@ -506,7 +506,7 @@ def card_notrade(ds, title, reasons, info=None, n_cand=None, extra=""):
 def card_start(ds, info, watch):
     """09:05 開始監看: 精簡模式下盤中唯一一則, 之後進場 / 停損 / 損益都靠選單查 (選單回覆走 reply API, 不算額度)。"""
     blocks = [LC.tiles(LC.tile("監看", f"{len(watch)} 檔", "跌破區間低就放空"), LC.tile("大盤跳空", LC.pct(info["mkt_gap"] * 100), f"上漲家數 {info['breadth']*100:.0f}%", LC.color(info["mkt_gap"]))),
-              LC.note("盤中進場 / 停損不再逐筆推播。\n點下方選單「持倉」「損益」隨時查看 (不佔推播額度)。")]
+              LC.note("進場會推通知; 停損、損益不推。\n點下方選單「持倉」「損益」隨時查看 (不佔推播額度)。")]
     return LC.card("🟢 今日開始監看", blocks, sub=f"{ds} 09:05", kind="entry", footer=("📱 今日持倉頁", f"{SITE}/web/today.html"),
                    alt=f"🟢 {ds} 開始監看 {len(watch)} 檔, 點下方選單「持倉」「損益」查看")
 
@@ -772,7 +772,7 @@ def _run(a, line):
     book.bars = Bars()
     for r in s5[s5.stock_id.isin(watch.stock_id)].itertuples(): book.bars.seed(r.stock_id, r.o, r.rh, r.rl, r.z, r.o5_v)
     pub.push(live_state(ds, "監看中", info, book, mem, excl), force=True)
-    if not a.line_all: line.push_async(card_start(ds, info, watch))         # 精簡模式: 每天只推這一則 (或不交易那一則)
+    if not a.line_all: line.push_async(card_start(ds, info, watch))         # 精簡模式: 開始監看 (或不交易) 一則 + 進場訊號
     evf = open(SIG / f"{ds}_events.csv", "a", encoding="utf-8")
     new_ev = []
     def log(e):
@@ -813,7 +813,8 @@ def _run(a, line):
                     book.bars.add(r.stock_id, t, r.z, r.v)
         with lock:                                      # tick 執行緒同時在改 book / mem / new_ev
             sig = [e for e in new_ev if e["event"] in ("SHORT", "STOP")]
-            if sig and a.line_all: line.push_async(card_events(sig, book, ds))           # 背景送, 不擋下一輪輪詢
+            if not a.line_all: sig = [e for e in sig if e["event"] == "SHORT"]   # 精簡模式: 只推進場, 停損靠選單查
+            if sig: line.push_async(card_events(sig, book, ds))           # 背景送, 不擋下一輪輪詢
             for sid in ids:                                    # 12:00 後 WAIT 失效
                 if book.s[sid]["state"] == "WAIT" and t >= P["DEADLINE"] + 1: book.s[sid]["state"] = "EXPIRED"
             holding = [s for s, p in book.s.items() if p["state"] == "SHORT"]
@@ -923,8 +924,8 @@ def main():
     p.add_argument("--tick-poll", type=float, default=2, help="用永豐 tick 時主迴圈 (發布 / LINE / 提醒) 的間隔秒數")
     p.add_argument("--mis-only", action="store_true", help="不用永豐 tick, 只用 MIS 輪詢 (舊做法)")
     p.add_argument("--notify", action="store_true", help="macOS 通知 (進場/停損/收盤提醒)")
-    p.add_argument("--line", action="store_true", help="LINE 推播 (預設精簡: 每天一則 開始監看 / 不交易 + 出錯; 需環境變數 LINE_CHANNEL_ACCESS_TOKEN、LINE_USER_ID)")
-    p.add_argument("--line-all", action="store_true", help="LINE 也逐筆推 進場 / 停損、13:24 回補提醒、結算 (每天約 10 則, 免費額度每月 200 則)")
+    p.add_argument("--line", action="store_true", help="LINE 推播 (預設精簡: 開始監看 / 不交易 一則 + 進場訊號 + 出錯; 需環境變數 LINE_CHANNEL_ACCESS_TOKEN、LINE_USER_ID)")
+    p.add_argument("--line-all", action="store_true", help="LINE 另外推 停損、13:24 回補提醒、結算 (每天約 10 則, 免費額度每月 200 則)")
     p.add_argument("--no-eligibility", action="store_true", help="不查現沖券賣資格")
     p.add_argument("--force", action="store_true", help="週一或大盤跳空 < -1%% 仍跑 (觀察用)")
     p.add_argument("--now", action="store_true", help="不等 09:02 / 09:05 (測試用)")
