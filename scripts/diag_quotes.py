@@ -15,7 +15,7 @@ for s in ids:
 q = OL.Quotes(OL.MIS(), api)
 a = q._sj(ids).set_index("stock_id"); b = OL.MIS().snapshot(ids, mk).set_index("stock_id")
 pd.set_option("display.width", 250)
-print("永豐快照:\n", a); print("MIS:\n", b)
+print("永豐快照:\n", a.to_string()); print("MIS:\n", b.to_string())
 print("closes 測試 (盤中應該都抓不到, 只驗證流程):")
 try: print(q.closes(ids[:2], mk[:2], deadline=(0, 0, 0)))
 except Exception as e: print("closes error", e)
