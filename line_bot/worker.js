@@ -48,7 +48,8 @@ function sigRows(live) {
 function simRows(paper) {
   // 已觸發 (state 非 WAIT) 但模擬環境還沒回成交 → 也列出來, 標「送單 待成交」(11-12: 聯一光 / 鈺創 09:05 送單, 09:08 還沒回報成交, 頁面上就像沒下單)
   return (paper?.positions || []).filter((r) => ok(r.sell_px) || (r.state !== "WAIT" && r.state !== "EXPIRED" && r.state !== "FULL")).map((r) => {
-    if (!ok(r.sell_px)) return { sid: r.stock_id, name: r.name, hold: true, pending: r.skipped ? `未下單 ${r.skipped}` : "送單 待成交", lots: r.lots, entry: r.rl, ref: r.last, rh: r.rh, pnl: null, pct: null };
+    const out = r.state === "STOPPED" || r.state === "CLOSED";   // 已停損 / 已收盤但券賣始終沒成交 (委託已取消): 不再算持有, 也不再顯示「待成交」
+    if (!ok(r.sell_px)) return { sid: r.stock_id, name: r.name, hold: !out, pending: r.skipped ? `未下單 ${r.skipped}` : out ? "券賣未成交 (已取消)" : "送單 待成交", lots: r.lots, entry: r.rl, ref: r.last, rh: r.rh, pnl: null, pct: null };
     const hold = !ok(r.buy_px), ref = hold ? r.last : r.buy_px;
     return { sid: r.stock_id, name: r.name, hold, stop: r.state === "STOPPED", lots: r.sell_lots, entry: +r.sell_px, ref, rh: r.rh, pnl: pnl(+r.sell_px, ref, r.sell_lots), pct: r.pnl_pct };
   });

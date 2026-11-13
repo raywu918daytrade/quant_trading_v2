@@ -758,6 +758,7 @@ class TickFeed:
     def on_tick(self, *args):
         tick = args[-1]
         try:
+            self.last_recv = time.time()                 # 試撮 (simtrade) 也算連線還活著: 13:25~13:30 收盤競價只有試撮, 沒有成交 tick
             if getattr(tick, "simtrade", False) or getattr(tick, "suspend", False): return
             sid, px = str(tick.code), float(tick.close)
             dt = getattr(tick, "datetime", None)
@@ -852,7 +853,7 @@ def _run(a, line):
     # ---- 盤中監看 ----
     while book.active() and now_tw().hour * 60 + now_tw().minute < 13 * 60 + 30:
         loop_start = time.time(); t = tmin(now_tw())
-        use_tick = feed.alive()
+        use_tick = feed.alive() or (feed.ready and t >= 265)   # 13:25 後是收盤集合競價, 本來就沒有成交 tick: 不算斷線 (否則每個有持倉的日子 13:27 都會誤報「改用 MIS」並推一則 LINE)
         now_src = "tick" if use_tick else "MIS"
         if now_src != src:
             if src is not None or now_src == "MIS":

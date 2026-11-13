@@ -74,7 +74,7 @@ function rowsSim(j) {
   let held = 0, real = 0, unreal = 0;
   const html = rs.map((r) => {
     if (!ok(r.sell_px)) {     // 已觸發但模擬環境還沒回成交 (或沒下單): 照樣列出, 免得看起來少了幾檔 (不算持有)
-      return `<a class="row" href="${chartLink(j.date, r.stock_id)}"><span class="nm">${r.stock_id} ${r.name}<span class="tag">${r.skipped ? "未下單" : "送單 待成交"}</span></span><span class="r big">–</span>
+      return `<a class="row" href="${chartLink(j.date, r.stock_id)}"><span class="nm">${r.stock_id} ${r.name}<span class="tag">${r.skipped ? "未下單" : ["STOPPED", "CLOSED"].includes(r.state) ? "券賣未成交 (已取消)" : "送單 待成交"}</span></span><span class="r big">–</span>
       <span class="d">${r.skipped ? r.skipped : `區間低 ${fmt(r.rl)} × ${r.lots} 張`}　停損 ${fmt(r.rh)}</span><span class="r d">現價 ${fmt(r.last)}</span></a>`;
     }
     const hold = !ok(r.buy_px), ref = hold ? r.last : r.buy_px, p = pnl(+r.sell_px, ref, r.sell_lots);
