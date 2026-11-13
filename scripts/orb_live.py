@@ -707,18 +707,27 @@ class Quotes:
         if self.api is None or not len(s5): return s5
         t0 = now_tw().replace(hour=9, minute=5, second=settle_sec, microsecond=0)
         if now_tw() < t0: time.sleep((t0 - now_tw()).total_seconds())
-        s5 = s5.copy(); ds = now_tw().strftime("%Y-%m-%d"); diff = []; n = 0
+        s5 = s5.copy(); ds = now_tw().strftime("%Y-%m-%d"); diff = []; n = 0; late = []; t_start = time.time()
+        last_bar = pd.Timestamp(f"{ds} 09:05:00")
         for sid in s5.stock_id:
             try:
-                kb = self.api.kbars(self.api.Contracts.Stocks[sid], start=ds, end=ds)
-                k = pd.DataFrame({**kb}); k["ts"] = pd.to_datetime(k.ts)
-                k = k[(k.ts > f"{ds} 09:00:00") & (k.ts <= f"{ds} 09:05:00") & (k.Volume > 0)]
-                if not len(k): continue
-                h, l = float(k.High.max()), float(k.Low.min()); m = s5.stock_id == sid; old = s5.loc[m].iloc[0]; n += 1
+                for tries in range(4):                    # 09:05 那根還沒入庫就等一下再抓 (無量的分鐘也會有一根 K)
+                    kb = self.api.kbars(self.api.Contracts.Stocks[sid], start=ds, end=ds)
+                    k = pd.DataFrame({**kb}); k["ts"] = pd.to_datetime(k.ts)
+                    if len(k) and k.ts.max() >= last_bar: break
+                    time.sleep(1.5)
+                else: late.append(sid)
+                k = k[(k.ts > f"{ds} 09:00:00") & (k.ts <= last_bar)]
+                kv = k[k.Volume > 0]
+                if not len(kv): continue
+                h, l = float(kv.High.max()), float(kv.Low.min()); m = s5.stock_id == sid; old = s5.loc[m].iloc[0]; n += 1
                 if not (abs(old.rh - h) < 1e-9 and abs(old.rl - l) < 1e-9): diff.append(f"{sid} {old.rl:g}~{old.rh:g}→{l:g}~{h:g}")
                 s5.loc[m, "rh"] = h; s5.loc[m, "rl"] = l
+                if "o5_v" in s5: s5.loc[m, "o5_v"] = float(k.Volume.sum())    # 開盤 5 分量 (張) 也用同一批 K, 兩邊一致
             except Exception as e: print(f"⚠ {sid} 1 分 K 失敗 ({e}), 區間用快照")
-        print(f"{now_tw():%H:%M:%S} 區間用永豐 1 分 K (09:00~09:05) {n}/{len(s5)} 檔" + (f"; 與快照不同: {', '.join(diff)}" if diff else ""))
+        print(f"{now_tw():%H:%M:%S} 區間用永豐 1 分 K (09:00~09:05) {n}/{len(s5)} 檔, 花 {time.time() - t_start:.1f} 秒"
+              + (f"; 與快照不同: {', '.join(diff)}" if diff else ""))
+        if late: print(f"⚠ {' '.join(late)} 等不到 09:05 那根 K, 區間只用 09:04 以前")
         return s5
 
     def closes(self, sids, markets, deadline=(13, 36, 0), retry=20):
