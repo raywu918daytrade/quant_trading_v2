@@ -892,7 +892,7 @@ def _run(a, line):
         if took > 3 * a.poll: print(f"⚠ {now_tw():%H:%M:%S} 這輪輪詢花了 {took:.0f} 秒 (設定 {a.poll:g} 秒)")   # 11-11 曾因同步上傳 HF 每 2 分鐘卡住一次
         time.sleep(max((a.tick_poll if use_tick else a.poll) - took, 0.5))
     with lock: feed.ready = False                        # 13:30 後不再由 tick 觸發; 收盤價照舊用 MIS 收盤競價結果
-    print(f"永豐 tick 共收到 {feed.n} 筆"); feed.stop()
+    print(f"永豐 tick 共收到 {feed.n} 筆")                # 先不登出: 收盤價 (Quotes.closes) 還要用永豐快照
     # ---- 收盤結算 ----
     holding = [s for s, p in book.s.items() if p["state"] == "SHORT"]
     if holding:
@@ -901,6 +901,7 @@ def _run(a, line):
         fin = mis.closes(holding, [mk[s] for s in holding])
         book.close_all({s: fin.get(s, mem[s]["z"]) for s in holding})
         for s in holding: book.bars.add(s, 270, book.s[s]["exit_px"], np.nan)      # 13:30 收盤那根
+    feed.stop()                                          # 收盤價抓完才登出永豐 (先登出的話 Quotes.closes 每次都失敗, 等到 13:36 才退回 MIS)
     evf.close()
     summarize(book.trades(), ds, SIG, info)
     tr = book.trades()
