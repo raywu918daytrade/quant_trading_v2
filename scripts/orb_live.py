@@ -700,6 +700,27 @@ class Quotes:
                 print(f"⚠ 永豐快照失敗 ({e}), 這次用 MIS")
         return self.mis.snapshot(sids, markets)
 
+    def range5(self, s5, settle_sec=3):
+        """開盤 5 分鐘區間 = 永豐 1 分 K (ts 為該分鐘結束時間) 09:01~09:05 的最高 / 最低 (有量的分鐘)。
+        快照的日高 / 日低會混進 09:05:00 之後幾秒的成交, 而且訊號端和模擬單抓的瞬間不同 (11-13 濱川兩邊區間低 104 / 103);
+        1 分 K 是固定的, 兩支程式算出來一樣。等到 09:05:0{settle_sec} 讓最後一根 K 收齊; 拿不到的檔維持快照值。"""
+        if self.api is None or not len(s5): return s5
+        t0 = now_tw().replace(hour=9, minute=5, second=settle_sec, microsecond=0)
+        if now_tw() < t0: time.sleep((t0 - now_tw()).total_seconds())
+        s5 = s5.copy(); ds = now_tw().strftime("%Y-%m-%d"); diff = []; n = 0
+        for sid in s5.stock_id:
+            try:
+                kb = self.api.kbars(self.api.Contracts.Stocks[sid], start=ds, end=ds)
+                k = pd.DataFrame({**kb}); k["ts"] = pd.to_datetime(k.ts)
+                k = k[(k.ts > f"{ds} 09:00:00") & (k.ts <= f"{ds} 09:05:00") & (k.Volume > 0)]
+                if not len(k): continue
+                h, l = float(k.High.max()), float(k.Low.min()); m = s5.stock_id == sid; old = s5.loc[m].iloc[0]; n += 1
+                if not (abs(old.rh - h) < 1e-9 and abs(old.rl - l) < 1e-9): diff.append(f"{sid} {old.rl:g}~{old.rh:g}→{l:g}~{h:g}")
+                s5.loc[m, "rh"] = h; s5.loc[m, "rl"] = l
+            except Exception as e: print(f"⚠ {sid} 1 分 K 失敗 ({e}), 區間用快照")
+        print(f"{now_tw():%H:%M:%S} 區間用永豐 1 分 K (09:00~09:05) {n}/{len(s5)} 檔" + (f"; 與快照不同: {', '.join(diff)}" if diff else ""))
+        return s5
+
     def closes(self, sids, markets, deadline=(13, 36, 0), retry=20):
         """收盤價: 只接受成交時間 ≥ 13:30:00 的價 (收盤集合競價結果)。永豐優先, 到 deadline 還缺的用 MIS。"""
         if self.api is None: return self.mis.closes(sids, markets, deadline, retry)
@@ -824,6 +845,7 @@ def _run(a, line):
     # ---- 09:05 區間 ----
     if not a.now: wait_until(9, 5, 0)
     s5 = mis.snapshot(cand.stock_id.tolist(), cand.market_type.tolist()).rename(columns={"h": "rh", "l": "rl", "u": "lu_live", "v": "o5_v"})
+    s5 = mis.range5(s5)                                  # 區間用 1 分 K 定 (與模擬單一致)
     watch, excl = range_stage(cand, s5[["stock_id", "rh", "rl", "lu_live", "o5_v"]], eligible=elig)
     info["n_watch"] = len(watch)
     book = Book(watch, "live", capital=a.capital, log=None)

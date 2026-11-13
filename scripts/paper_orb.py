@@ -616,6 +616,7 @@ def cmd_run(a):
     # ---- 09:05 區間 ----
     if not a.now: OL.wait_until(9, 5, 0)
     s5 = mis.snapshot(cand.stock_id.tolist(), cand.market_type.tolist()).rename(columns={"h": "rh", "l": "rl", "u": "lu_live", "v": "o5_v"})
+    s5 = mis.range5(s5)                                  # 區間用 1 分 K 定 (與訊號端一致)
     watch, excl = OL.range_stage(cand, s5[["stock_id", "rh", "rl", "lu_live", "o5_v"]], eligible=elig); info["n_watch"] = len(watch)
     book = OL.Book(watch, "live", capital=a.capital)
     watch["lots"] = watch.stock_id.map(lambda s: book.s[s]["lots"])

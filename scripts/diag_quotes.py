@@ -24,4 +24,5 @@ for sid in ids[2:4]:
         kb = api.kbars(api.Contracts.Stocks[sid], start=pd.Timestamp.now().strftime("%Y-%m-%d"), end=pd.Timestamp.now().strftime("%Y-%m-%d"))
         k = pd.DataFrame({**kb}); k["ts"] = pd.to_datetime(k.ts); print("kbars", sid, len(k)); print(k.head(8).to_string())
     except Exception as e: print("kbars error", sid, e)
+print("range5:\n", q.range5(a.reset_index().rename(columns={"h": "rh", "l": "rl"})[["stock_id", "rh", "rl"]]).to_string())
 api.logout()
