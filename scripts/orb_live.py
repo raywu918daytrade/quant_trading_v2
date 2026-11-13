@@ -691,8 +691,8 @@ class Quotes:
         if self.api is not None:
             try:
                 df = self._sj(sids)
-                if len(df) >= 0.9 * len(sids): return df
-                miss = [s for s in sids if s not in set(df.stock_id)]
+                miss = [s for s in sids if s not in set(df.stock_id)]          # 缺幾檔都用 MIS 補 (不然會被當成「開盤 5 分無成交」剔除)
+                if not miss: return df
                 if not self.warned: print(f"⚠ 永豐快照缺 {len(miss)} 檔, 用 MIS 補"); self.warned = True
                 mk = dict(zip(sids, markets))
                 return pd.concat([df, self.mis.snapshot(miss, [mk[s] for s in miss])], ignore_index=True)

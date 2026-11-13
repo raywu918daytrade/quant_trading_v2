@@ -19,4 +19,9 @@ print("永豐快照:\n", a.to_string()); print("MIS:\n", b.to_string())
 print("closes 測試 (盤中應該都抓不到, 只驗證流程):")
 try: print(q.closes(ids[:2], mk[:2], deadline=(0, 0, 0)))
 except Exception as e: print("closes error", e)
+for sid in ids[2:4]:
+    try:
+        kb = api.kbars(api.Contracts.Stocks[sid], start=pd.Timestamp.now().strftime("%Y-%m-%d"), end=pd.Timestamp.now().strftime("%Y-%m-%d"))
+        k = pd.DataFrame({**kb}); k["ts"] = pd.to_datetime(k.ts); print("kbars", sid, len(k)); print(k.head(8).to_string())
+    except Exception as e: print("kbars error", sid, e)
 api.logout()
