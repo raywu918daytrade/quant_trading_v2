@@ -73,8 +73,8 @@ def line(name, z):
     r = z.s_r; e = z.exp
     if len(r) < 30: return f"| {name} | {len(r)} | | | | | | |"
     return (f"| {name} | {len(r):,} ({len(r)/len(X)*100:.0f}%) | {r.mean():.3f} | {(r>0).mean()*100:.0f} | {(z.s_why=='停損').mean()*100:.0f} | "
-            f"{(z.s_why=='強制').mean()*100:.1f} | {r[e].mean():.3f} / {r[~e].mean():.3f} | {(r[e]>0).mean()*100:.0f} / {(r[~e]>0).mean()*100:.0f} |")
-HDR = ["| 分組 | 筆數 (占比) | 每筆% | 勝率% | 停損% | +8%強制% | 探索/驗證 每筆% | 探索/驗證 勝率% |", "|---|---|---|---|---|---|---|---|"]
+            f"{r[e].mean():.3f} / {r[~e].mean():.3f} | {(r[e]>0).mean()*100:.0f} / {(r[~e]>0).mean()*100:.0f} |")
+HDR = ["| 分組 | 筆數 (占比) | 每筆% | 勝率% | 停損% | 探索/驗證 每筆% | 探索/驗證 勝率% |", "|---|---|---|---|---|---|---|"]
 def bucket(title, col, edges=None, q=5, note=""):
     P(""); P(f"### {title}");
     if note: P(note)
@@ -141,6 +141,19 @@ lo_, hi_ = np.nanquantile(T.rr, [0.2, 0.8])
 for lab, ok in [(f"散戶多空比 ≥ {hi_:.1f}% (前 20% 偏多) 當天不做", ~(X.rr >= hi_)), (f"散戶多空比 ≤ {lo_:.1f}% (前 20% 偏空) 當天不做", ~(X.rr <= lo_))]:
     X["ok_rr"] = ok
     P(port(X, "ok_rr", keep_only=True, name=lab))
+for th in [-1.0, -1.7, -3.0]:
+    X["ok_mk"] = ~(X.mkt_dmb5 <= th)
+    P(port(X, "ok_mk", keep_only=True, name=f"大盤融資 5 日減 ≥{-th:.1f}% 當天不做"))
+    P(port(X, "ok_mk", w_on=1.0, w_off=0.5, name=f"大盤融資 5 日減 ≥{-th:.1f}% 當天 0.5 格"))
+X["ok_has"] = X.has
+P(port(X, "ok_has", keep_only=True, name="跳過「無融資融券資料」"))
+P("")
+P("### 大盤融資 5 日減 ≥1.7% 的日子, 逐年 (每筆% / 筆數)")
+P("")
+P("| 年 | 減 ≥1.7% 每筆% (筆) | 其他 每筆% (筆) |"); P("|---|---|---|")
+for y in range(2020, 2027):
+    z = X[X.date.dt.year == y]; m = z.mkt_dmb5 <= -1.7
+    P(f"| {y} | {z[m].s_r.mean():.3f} ({m.sum()}) | {z[~m].s_r.mean():.3f} ({(~m).sum()}) |")
 P("")
 P("注意: 「跳過」= 該筆不做, 當天名額讓給後面跌破的股票。0.5 格版本總曝險較低, 比 Sharpe 較公平。")
 
