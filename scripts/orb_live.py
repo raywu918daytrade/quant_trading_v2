@@ -758,6 +758,7 @@ class TickFeed:
     def __init__(self, book, mem, lock):
         self.book, self.mem, self.lock = book, mem, lock
         self.api = None; self.ready = False; self.last_recv = 0.0; self.n = 0
+        self.po = None                                   # --paper: paper_orb.PaperOrb, 同一本 Book 的事件直接轉成模擬委託
 
     def login(self):
         """09:02 先登入 (09:05 定區間要用永豐快照); 失敗回 False, 之後全用 MIS。"""
@@ -792,14 +793,18 @@ class TickFeed:
             if getattr(tick, "simtrade", False) or getattr(tick, "suspend", False): return
             sid, px = str(tick.code), float(tick.close)
             dt = getattr(tick, "datetime", None)
-            dt = (dt.replace(tzinfo=TZ) if dt.tzinfo is None else dt.astimezone(TZ)) if isinstance(dt, datetime) else now_tw()
+            recv = now_tw()
+            dt = (dt.replace(tzinfo=TZ) if dt.tzinfo is None else dt.astimezone(TZ)) if isinstance(dt, datetime) else recv
             cumv = float(getattr(tick, "total_volume", np.nan) or np.nan)
             with self.lock:
                 self.last_recv = time.time(); self.n += 1
                 if not self.ready or sid not in self.book.s or not (px > 0): return
-                t = tmin(dt); m = self.mem[sid]
+                t = tmin(dt); m = self.mem[sid]; po = self.po
                 m["z"] = px; m["h"] = max(m["h"], px); m["l"] = min(m["l"], px)
-                if self.book.s[sid]["state"] in ("WAIT", "SHORT"): self.book.step(t, sid, px, px, px, px)
+                if po is not None: po.last[sid] = px; po.last_t[sid] = dt; po.n_ticks[sid] += 1
+                if self.book.s[sid]["state"] in ("WAIT", "SHORT") and not (po is not None and po.closing):   # 模擬單 13:25 掛出收盤回補後不再觸發停損
+                    if po is not None: po._cur = (px, dt, recv)        # 這筆 tick 的 價 / 交易所時間 / 收到時間, 送單紀錄用
+                    self.book.step(t, sid, px, px, px, px)
                 if getattr(self.book, "bars", None) is not None: self.book.bars.add(sid, t, px, cumv)
         except Exception as e:
             print("tick callback error:", e)
@@ -816,31 +821,50 @@ def cmd_run(a):
     line = Line(a.line)
     try: _run(a, line)
     except (Exception, KeyboardInterrupt) as e:
-        line.flush(); line.push(card_error("orb_live", f"{type(e).__name__}: {str(e)[:300]}"))
+        extra = ""
+        po = getattr(a, "_po", None)                     # --paper: 程式要死了, 模擬帳戶裡還開著的空單先買回 (13:25 前市價, 之後漲停價限價)
+        if po is not None and not po.closing:
+            try:
+                n = now_tw(); held, failed = po.close_all(limit=(n.hour, n.minute, n.second) >= (13, 25, 0))
+                if held: extra = f" | 模擬單已送出回補 {' '.join(held)}" + (f", 失敗 {' '.join(failed)}" if failed else "")
+            except Exception as e2: extra = f" | 模擬單回補失敗 ({e2}), 模擬帳戶可能還有空單"
+        line.flush(); line.push(card_error("orb_live", f"{type(e).__name__}: {str(e)[:300]}{extra}"))
         raise
 
 def _run(a, line):
     today = pd.Timestamp(now_tw().date()); ds = str(today.date())
     SIG.mkdir(exist_ok=True)
     pub = Publisher(a.publish)
+    # --paper (2026-11-13 合併): 永豐模擬單不再是另一支程式, 直接掛在這裡 — 同一份名單 / 區間 / tick / Book, 訊號與模擬單不可能再不一致。
+    PO = ppub = po = None
+    if a.paper:
+        import paper_orb as PO
+        ppub = PO.Pub(a.publish)
     pool, last = cmd_pool(argparse.Namespace(date=None))
     pub.push(live_state(ds, "盤前", note=f"盤前池 {int(pool.in_pool.sum())} 檔 (D1 最後 {last.date()})"), force=True)
     if today.dayofweek in P["NO_DOW"] and not a.force:
         print("今天週一, 規則不交易 (加 --force 仍可跑完, 僅供觀察)。")
         line.push(card_notrade(ds, "😴 今日不交易", ["週一, 規則不交易"]))
-        pub.push(live_state(ds, "不交易", note="週一不交易"), force=True); return
+        pub.push(live_state(ds, "不交易", note="週一不交易"), force=True)
+        _paper_no_trade(PO, ppub, ds, dict(trade_ok=False, reasons=["週一不交易"]), "週一不交易")
+        return
     elig = None if a.no_eligibility else fetch_eligible(ds)
     feed = TickFeed(None, {}, threading.RLock())
     if not a.mis_only: feed.login()                      # 08:50 先登入永豐: 開盤價、區間、tick、收盤價都用永豐, MIS 只當備援
     mis = Quotes(MIS(), feed.api)
     print("報價來源: " + ("永豐 (MIS 備援)" if feed.api is not None else "MIS (永豐未登入)"))
+    if ppub and feed.api is None:                        # 訊號照跑 (MIS), 模擬單今天停
+        msg = "永豐模擬環境未登入, 今天不送模擬單 (訊號照常)"; print("⚠ " + msg)
+        line.push_async(LC.from_text("❌ " + msg, kind="error")); ppub.live(dict(date=ds, phase="未啟動", note=msg), force=True); ppub = None
     # ---- 09:02 開盤價 / 大盤跳空 ----
     if not a.now: wait_until(9, 2, 0)
     snap = mis.snapshot(pool.stock_id.tolist(), pool.market_type.tolist())
     mis_day = snap.mis_d.dropna().mode()
     if len(mis_day) == 0 or mis_day.iloc[0] != today.strftime("%Y%m%d"):
         msg = f"MIS 回傳日期 {mis_day.iloc[0] if len(mis_day) else '無'} ≠ 今天, 可能非交易日或尚未開盤"
-        print(msg + ", 結束。"); line.push(card_notrade(ds, "😴 休市 / 非交易日", ["非交易日或休市"], extra=msg)); pub.push(live_state(ds, "非交易日", note=msg), force=True); sys.exit(0 if a.publish else 2)
+        print(msg + ", 結束。"); line.push(card_notrade(ds, "😴 休市 / 非交易日", ["非交易日或休市"], extra=msg)); pub.push(live_state(ds, "非交易日", note=msg), force=True)
+        if ppub: ppub.live(dict(date=ds, phase="非交易日", note=msg), force=True); ppub.flush()
+        feed.stop(); sys.exit(0 if a.publish else 2)
     cand, info = open_stage(pool, snap.rename(columns={"o": "open"}), today)
     info["n_cand"] = len(cand)
     print(f"09:02 開盤: 有開盤價 {info['n_open']}/{info['n_liq']}；大盤平均跳空 {info['mkt_gap']*100:+.2f}%  上漲家數比 {info['breadth']*100:.0f}%；跳空≥2% 的池內候選 {len(cand)} 檔")
@@ -849,8 +873,11 @@ def _run(a, line):
         line.push(card_notrade(ds, "⛔ 今日不交易", info["reasons"], info, len(cand), "(--force: 照跑, 僅供觀察)" if a.force else ""))
         if not a.force:
             cand.to_csv(SIG / f"{ds}_cand.csv", index=False)
-            pub.push(live_state(ds, "不交易", info, cand=cand, note="；".join(info["reasons"])), force=True); pub.upload_day(ds); return
+            pub.push(live_state(ds, "不交易", info, cand=cand, note="；".join(info["reasons"])), force=True); pub.upload_day(ds)
+            _paper_no_trade(PO, ppub, ds, info, "；".join(info["reasons"]))
+            feed.stop(); return
     pub.push(live_state(ds, "等待 09:05", info, cand=cand), force=True)
+    if ppub: ppub.live(dict(date=ds, phase="等待 09:05", n_cand=len(cand)), force=True)
     # ---- 09:05 區間 ----
     if not a.now: wait_until(9, 5, 0)
     s5 = mis.snapshot(cand.stock_id.tolist(), cand.market_type.tolist()).rename(columns={"h": "rh", "l": "rl", "u": "lu_live", "v": "o5_v"})
@@ -874,12 +901,56 @@ def _run(a, line):
         evf.write(",".join(str(e[k]) for k in ["time", "stock_id", "name", "event", "price", "ref", "note"]) + "\n"); evf.flush()
         new_ev.append(e)
         if a.notify and e["event"] in ("SHORT", "STOP"): notify(f"{e['event']} {e['stock_id']} {e['name']}", f"{e['price']:.2f} {e['note']}")
+        if po is not None and e["event"] in ("SHORT", "STOP", "FULL"): po._on_book_event(e)   # 同一個事件 → 模擬委託 (排進送單執行緒, 不在這裡等)
+    if ppub and len(watch):
+        try:                                             # 模擬單掛不上去不可以連訊號一起停
+            import shioaji as sj
+            broker = PO.SinopacBroker(feed.api, sj)
+            po_ = PO.PaperOrb(book, watch, broker, ds); po_.lock = feed.lock    # 同一把鎖: tick 執行緒改 Book 時, 主迴圈讀部位不會讀到一半
+            for sid in watch.stock_id:
+                why = broker.can_short(sid)
+                if why: po_.skipped[sid] = why; print(f"注意 {sid}: {why}, 跌破時不下模擬單 (Book 仍計入名額)")
+            feed.api.set_order_callback(po_.on_order)
+            po_.start(); po_.ready = True; po = po_; feed.po = po; a._po = po      # a._po: cmd_run 出錯中斷時用來回補模擬部位
+        except Exception as e:
+            msg = f"模擬單啟動失敗, 今天不送模擬單 (訊號照常): {type(e).__name__}: {str(e)[:200]}"; print("⚠ " + msg)
+            line.push_async(LC.from_text("❌ " + msg, kind="error"))
+            try: ppub.live(dict(date=ds, phase="未啟動", note=msg), force=True)
+            except Exception: pass
+            po = None; ppub = None
     book.log = log
+    paper_state = lambda phase, note="": dict(date=ds, phase=phase, note=note, mkt_gap=info.get("mkt_gap"), n_cand=info["n_cand"], n_watch=len(watch), slot=book.slot,
+                                              positions=po.live_rows() if po else [], events=[{k: (PO.hms(v) if isinstance(v, datetime) else v) for k, v in e.items()} for e in list(po.events)] if po else [])
+    pt = dict(sync=time.time(), push=time.time(), err=0)
+    t_auc = now_tw().replace(hour=PO.AUCTION_T[0], minute=PO.AUCTION_T[1], second=PO.AUCTION_T[2], microsecond=0) if PO else None
+    def paper_step():
+        """模擬單的例行工作 (主迴圈每輪呼叫, 不持鎖): 補買回差額、補漏掉的成交回報、13:25:10 掛收盤回補、上傳 paper/live.json。
+        出錯只印出 / 推一次 LINE, 不可以讓訊號端跟著中斷。"""
+        def guard(what, f, always_line=False):
+            try: return f()
+            except Exception as e:
+                pt["err"] += 1; print(f"⚠ 模擬單{what}出錯 ({pt['err']}): {type(e).__name__}: {e}")
+                if pt["err"] == 1 or always_line: line.push_async(LC.from_text(f"❌ 模擬單{what}出錯 (訊號照常): {type(e).__name__}: {str(e)[:200]}", kind="error"))
+        if not po.closing and now_tw() >= t_auc:          # 收盤回補最優先, 不被下面任何一步的錯誤擋住
+            def auction():
+                try: po.sync_deals()
+                except Exception as e: print(f"⚠ 收盤回補前 sync_deals 失敗: {e}")
+                held, failed = po.close_all(limit=True)
+                print(f"{now_tw():%H:%M:%S} 模擬單 13:25 收盤競價回補 {len(held)} 檔 (漲停價限價): {held}")
+                if failed: raise RuntimeError("收盤回補委託失敗: " + ", ".join(failed))
+                return held
+            held = guard("收盤回補", auction, always_line=True) or []
+            guard("上傳", lambda: ppub.live(paper_state("等待收盤", f"收盤競價回補 {len(held)} 檔"), force=True)); po.dirty = False; pt["push"] = time.time()
+        guard("補單", po.reconcile)
+        if time.time() - pt["sync"] >= 30: pt["sync"] = time.time(); guard("對帳", po.sync_deals)
+        if po.dirty or time.time() - pt["push"] >= 10:
+            d = po.dirty; po.dirty = False; pt["push"] = time.time()
+            guard("上傳", lambda: ppub.live(paper_state("等待收盤" if po.closing else "監看中"), event=d))
+    if po is not None: ppub.live(paper_state("監看中"), force=True)
     mk = dict(zip(watch.stock_id, watch.market_type))
     reminded = False
     lock = feed.lock; feed.book, feed.mem = book, mem
     if len(watch) and not a.mis_only: feed.start(watch.stock_id.tolist())
-    elif feed.api is not None: feed.stop()
     src = None                                           # 目前的資料來源 ("tick" / "MIS"), 切換時印出並推 LINE
     # ---- 盤中監看 ----
     while book.active() and now_tw().hour * 60 + now_tw().minute < 13 * 60 + 30:
@@ -900,7 +971,10 @@ def _run(a, line):
                     m = mem[r.stock_id]
                     hi = np.nanmax([r.z, r.h if r.h > m["h"] else np.nan]); lo = np.nanmin([r.z, r.l if r.l < m["l"] else np.nan])
                     last = r.z if np.isfinite(r.z) else m["z"]
-                    if np.isfinite(hi) or np.isfinite(lo):
+                    if po is not None:
+                        if np.isfinite(last): po.last[r.stock_id] = float(last)
+                        po._cur = (last, now_tw(), now_tw())    # 備援 (快照輪詢) 觸發時沒有逐筆 tick, 用這次快照的價與時間
+                    if (np.isfinite(hi) or np.isfinite(lo)) and not (po is not None and po.closing):   # 模擬單 13:25 掛出收盤回補後不再觸發
                         book.step(t, r.stock_id, lo if np.isfinite(lo) else np.inf, hi if np.isfinite(hi) else -np.inf, last, last)
                     m["h"] = np.nanmax([m["h"], r.h]); m["l"] = np.nanmin([m["l"], r.l]); m["z"] = last
                     if np.isfinite(r.b1): m["px"] = r.b1
@@ -918,6 +992,7 @@ def _run(a, line):
                 if a.line_all: line.push_async(card_reminder(holding, book, mem, ds))
                 pub.push(live_state(ds, "收盤回補提醒", info, book, mem, excl, note=f"13:25 前掛市價買回 {len(holding)} 檔"), force=True)
             pub.push(live_state(ds, "監看中", info, book, mem, excl), event=bool(new_ev)); new_ev.clear()
+        if po is not None: paper_step()
         if not book.active() or (not holding and t >= P["DEADLINE"] + 1): break
         took = time.time() - loop_start
         if took > 3 * a.poll: print(f"⚠ {now_tw():%H:%M:%S} 這輪輪詢花了 {took:.0f} 秒 (設定 {a.poll:g} 秒)")   # 11-11 曾因同步上傳 HF 每 2 分鐘卡住一次
@@ -932,7 +1007,6 @@ def _run(a, line):
         fin = mis.closes(holding, [mk[s] for s in holding])
         book.close_all({s: fin.get(s, mem[s]["z"]) for s in holding})
         for s in holding: book.bars.add(s, 270, book.s[s]["exit_px"], np.nan)      # 13:30 收盤那根
-    feed.stop()                                          # 收盤價抓完才登出永豐 (先登出的話 Quotes.closes 每次都失敗, 等到 13:36 才退回 MIS)
     evf.close()
     summarize(book.trades(), ds, SIG, info)
     tr = book.trades()
@@ -941,6 +1015,39 @@ def _run(a, line):
     st = live_state(ds, "已結算", info, book, mem, excl)
     (SIG / f"{ds}_chart.json").write_text(json.dumps(_jclean(st), ensure_ascii=False, default=_jdefault), encoding="utf-8")   # 隨 upload_day 上傳, chart.html 看歷史日用
     pub.push(st, force=True); pub.upload_day(ds)
+    # ---- 模擬單收尾 (訊號已結算並上傳; 這段出錯不影響訊號紀錄) ----
+    if ppub:
+        try: _paper_finish(PO, po, ppub, paper_step, paper_state, mis, ds, info, watch, mk)
+        except Exception as e:
+            print(f"⚠ 模擬單結算出錯: {type(e).__name__}: {e}"); line.push(LC.from_text(f"❌ 模擬單結算出錯: {type(e).__name__}: {str(e)[:200]}", kind="error"))
+    feed.stop()                                          # 收盤價抓完、模擬單結算完才登出永豐
+
+def _paper_no_trade(PO, ppub, ds, info, note):
+    """不交易日的模擬單紀錄 (空的 summary); 出錯不影響訊號端。"""
+    if not ppub: return
+    try: PO.no_trade_day(ds, info, ppub, note); ppub.flush()
+    except Exception as e: print(f"⚠ 模擬單不交易紀錄失敗: {type(e).__name__}: {e}")
+
+def _paper_finish(PO, po, ppub, paper_step, paper_state, quotes, ds, info, watch, mk):
+    """模擬單收尾: 等收盤競價成交回報 (到 13:35) → 對帳 → 結算 → 寫 paper/<date>_* 並上傳。
+    盤中提早結束 (全部停損 / 12:00 後沒有部位) 時沒有收盤回補, 只多等 3 分鐘收齊回報 (取消券賣與成交賽跑時 reconcile 會補買回)。"""
+    if po is None:                                       # 監看名單 0 檔
+        summ = PO.summarize(ds, info, pd.DataFrame(), pd.DataFrame(), 0, "simulation")
+        PO.write_day(ds, pd.DataFrame(columns=["date", "stock_id"]), pd.DataFrame(columns=["date", "stock_id", "leg"]), [], summ)
+        ppub.live(paper_state("已結算", "監看名單 0 檔"), force=True); ppub.day(ds, summ, pd.DataFrame()); ppub.flush(); return
+    end = now_tw().replace(hour=PO.END_T[0], minute=PO.END_T[1], second=PO.END_T[2], microsecond=0) if po.closing else now_tw() + pd.Timedelta(seconds=180 if po.orders else 0)
+    while now_tw() < end: time.sleep(0.5); paper_step()
+    po.stop(); po.sync_deals(); po.reconcile()
+    real = {}
+    if po.closing:                                       # 有跑到收盤: 全部監看股的真實收盤價 (永豐快照, 缺的用 MIS)
+        try: ids = list(po.book.s); real = quotes.closes(ids, [mk[s] for s in ids])
+        except Exception as e: print(f"⚠ 抓收盤價失敗 ({e}), 用最後一筆 tick 當收盤價")
+    trades, legs = po.settle(real)
+    summ = PO.summarize(ds, info, trades, legs, len(watch), "simulation")
+    PO.write_day(ds, trades, legs, po.events, summ)
+    print("模擬單結算:", json.dumps(_jclean(summ), ensure_ascii=False))
+    if len(trades): print(trades[["stock_id", "name", "status", "rl", "sell_px", "entry_slip_ticks", "rh", "buy_px", "exit_leg", "exit_slip_ticks", "sim_net_pct", "ideal_net_pct"]].to_string(index=False))
+    ppub.live(paper_state("已結算"), force=True); ppub.day(ds, summ, legs); ppub.flush()
 
 def cmd_line_test(a):
     """--text 給了就推那段文字 (第一行當標題, ❌ 開頭用紅色出錯樣式); 沒給就拿最近一天真的有進場的回測結果, 推一張結算卡片當範例。"""
@@ -1017,6 +1124,7 @@ def main():
     p.add_argument("--capital", type=float, default=3_000_000, help="總資金, 每檔額度 = 資金/10")
     p.add_argument("--poll", type=float, default=10, help="輪詢秒數 (MIS 備援時)")
     p.add_argument("--tick-poll", type=float, default=2, help="用永豐 tick 時主迴圈 (發布 / LINE / 提醒) 的間隔秒數")
+    p.add_argument("--paper", action="store_true", help="同一支程式順便在永豐『模擬環境』下單 (paper_orb.PaperOrb): 同一份名單 / 區間 / tick, 結果寫 paper/ 並上傳 HF db/orb/paper/")
     p.add_argument("--mis-only", action="store_true", help="不用永豐 tick, 只用 MIS 輪詢 (舊做法)")
     p.add_argument("--notify", action="store_true", help="macOS 通知 (進場/停損/收盤提醒)")
     p.add_argument("--line", action="store_true", help="LINE 推播 (預設精簡: 開始監看 / 不交易 一則 + 進場訊號 + 出錯; 需環境變數 LINE_CHANNEL_ACCESS_TOKEN、LINE_USER_ID)")

@@ -257,7 +257,7 @@ class PaperOrb:
             self.book.step(OL.tmin(dt), sid, px, px, px, px)
 
     def _on_book_event(self, e):
-        px, dt, recv = self._cur
+        px, dt, recv = self._cur or (e.get("price"), now(), now())
         e = {**e, "tick_px": px, "tick_time": dt, "recv_time": recv}
         self.events.append(e); self.q.put(e); self.dirty = True
 
@@ -289,7 +289,7 @@ class PaperOrb:
         """callback 可能漏: 用 update_status 的 trade.status.deals 補齊 (以張數多者為準)."""
         self.broker.refresh()
         with self.lock:
-            for key, trs in self.orders.items():
+            for key, trs in list(self.orders.items()):        # 送單執行緒同時在加 key
                 ds = [d for tr in trs for d in self.broker.deals(tr)]
                 if sum(q for _, q, _ in ds) > sum(q for _, q, _ in self.deals[key]): self.deals[key] = ds
 
@@ -355,12 +355,13 @@ class PaperOrb:
             log(f"買回 {sid} {q} 張 {f'限價 {limit_px:g} (收盤競價)' if limit_px else '市價'} ({L['leg']}) → {st}")
         except Exception as ex:
             L["status"] = f"委託失敗: {ex}"; log("✗ 買回委託失敗", sid, ex)
+            L.setdefault("ordered", 0); L["fail"] = L.get("fail", 0) + 1      # reconcile 會再補送 (最多 5 次), 不然這檔空單就沒人買回
 
     def reconcile(self):
         """券賣成交張數 > 已送出的買回張數 (取消券賣與成交賽跑時會發生) → 補送買回差額."""
         for sid, legs in list(self.leg.items()):
             L = legs.get("exit")
-            if not L or "ordered" not in L: continue
+            if not L or "ordered" not in L or L.get("fail", 0) >= 5: continue
             _, q, _ = self.filled((sid, "Sell"))
             if q > L["ordered"]:
                 with self.sid_lock[sid]:
@@ -373,9 +374,14 @@ class PaperOrb:
         """13:25 後: Book 仍在 SHORT 的部位, 以漲停價限價買回 (= 以收盤價成交)."""
         with self.lock:
             self.closing = True; holding = [s for s, p in self.book.s.items() if p["state"] == "SHORT"]
-        for sid in holding:
-            with self.sid_lock[sid]: self._close_one(sid, limit)
-        return holding
+        failed = []
+        for sid in holding:                              # 一檔出錯不可以讓後面的檔沒回補
+            try:
+                with self.sid_lock[sid]: self._close_one(sid, limit)
+                if str(self.leg[sid].get("exit", {}).get("status", "")).startswith("委託失敗"): failed.append(sid)
+            except Exception as ex:
+                failed.append(sid); log(f"✗ 收盤回補 {sid} 出錯: {ex}")
+        return holding, failed
 
     def _close_one(self, sid, limit):
         if "exit" in self.leg[sid] or self.leg[sid].get("entry", {}).get("status") == "skipped": return
@@ -504,7 +510,7 @@ class Pub:
     """paper 狀態上傳 HF db/orb/paper/ (同 orb_live.Publisher 的做法: token 只從環境變數讀, 不印出)."""
     def __init__(self, enabled, min_gap=LIVE_EVERY, event_gap=EVENT_GAP):
         self.enabled, self.min_gap, self.event_gap, self.last, self.api = enabled, min_gap, event_gap, 0.0, None
-        self.pending = False; self._kick = threading.Event(); self._msg = ""
+        self.pending = False; self._kick = threading.Event(); self._msg = ""; self._idle = threading.Event(); self._idle.set()
         if enabled:
             tok = os.environ.get("HF_TOKEN")
             if not tok: log("⚠ --publish 但沒有 HF_TOKEN, 只寫本機 paper/"); self.enabled = False
@@ -516,12 +522,17 @@ class Pub:
     def _uploader(self):
         """背景上傳 live.json: HF 上傳要數秒, 不可以卡住盤中送單 (11-04 開盤第一批訊號因此延遲 10 秒以上)。"""
         while True:
-            self._kick.wait(); self._kick.clear()
+            self._kick.wait(); self._kick.clear(); self._idle.clear()
             for k in range(3):
                 try:
                     self.api.upload_file(path_or_fileobj=str(PAPER / "live.json"), path_in_repo=f"{HF_PAPER}/live.json", repo_id=HF_REPO, repo_type="dataset",
                                          commit_message=self._msg); break
                 except Exception as e: log(f"HF 上傳失敗 ({k + 1}/3): {e}"); time.sleep(3)
+            if not self._kick.is_set(): self._idle.set()
+
+    def flush(self, timeout=60):
+        """等背景上傳做完 (程式結束前呼叫, 否則最後一次 live.json 可能來不及傳)."""
+        if self.enabled: self._idle.wait(timeout)
 
     def live(self, state, force=False, event=False):
         """force: 階段變化 (一定上傳); event: 有新事件 (最快每 event_gap 秒, 被擋下的會在之後補傳); 其餘每 min_gap 秒。"""
@@ -534,7 +545,7 @@ class Pub:
         gap = time.time() - self.last
         if not (force or gap >= self.min_gap or (self.pending and gap >= self.event_gap)): return
         self.last = time.time(); self.pending = False
-        self._msg = f"orb paper live {state.get('date')} {state.get('phase')}"; self._kick.set()
+        self._msg = f"orb paper live {state.get('date')} {state.get('phase')}"; self._idle.clear(); self._kick.set()
 
     def _cumulative(self, name, today_df, ds):
         """下載 HF 上的累計檔, 換掉同一天的列後回傳 CSV bytes; 讀取失敗 (非「檔案不存在」) 回 None, 避免覆蓋掉歷史."""
@@ -653,7 +664,7 @@ def cmd_run(a):
             pub.live(state("監看中"), event=po.dirty); po.dirty = False; last_push = time.time()
     # ---- 13:25 收盤競價回補 ----
     po.sync_deals()
-    holding = po.close_all(limit=True)
+    holding, _ = po.close_all(limit=True)
     log(f"13:25 收盤競價回補 {len(holding)} 檔 (漲停價限價): {holding}")
     pub.live(state("等待收盤", f"收盤競價回補 {len(holding)} 檔"), force=True)
     sleep_until(at(*END_T), step=lambda d: (po.process(d), po.reconcile()))

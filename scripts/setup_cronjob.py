@@ -1,6 +1,6 @@
 """用 cron-job.org API 建立/更新 v2 的定時工作 (平日, 台灣時間), 觸發 GitHub workflow_dispatch:
   08:50 live.yml     盤中監看 (腳本自己等到 09:02 / 09:05, 跑到 13:31)
-  08:50 paper.yml    永豐模擬環境自動執行 + 滑價紀錄 (paper_orb.py, 跑到 13:35; 需 repo secrets SINOPAC_API_KEY / SINOPAC_SECRET_KEY)
+  08:50 paper.yml    (2026-11-13 起模擬單已合併進 live.yml 的 orb_live.py run --paper; 這支 workflow 被觸發時預設不做事, 這個排程可留可刪)
   21:00 nightly.yml  歷史回放補新交易日 + 匯出網頁資料
   08:10 nightly.yml  補跑 (前一晚 HF 分 K 還沒更新時)
 需要兩把 token (值絕不印出):

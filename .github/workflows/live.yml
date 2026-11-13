@@ -39,7 +39,7 @@ jobs:
         run: |
           set -o pipefail   # Shioaji 登入時會印含身分證字號的 Session Property 行, 濾掉 (同 paper.yml)
           F=""; [ -n "${{ github.event.inputs.force }}" ] && F="--force"
-          python3 -W ignore scripts/orb_live.py run --publish --line $F 2>&1 | grep --line-buffered -v "Session Property"
+          python3 -W ignore scripts/orb_live.py run --publish --line --paper $F 2>&1 | grep --line-buffered -v "Session Property"
       - name: LINE alert if the job failed before / outside the run step
         # run 步驟自己出錯時程式已推過 (outcome == failure), 這裡只補: 安裝 / refresh 失敗、逾時或被取消
         if: (failure() || cancelled()) && steps.run.outcome != 'failure'
@@ -53,6 +53,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: signals
-          path: signals/
+          path: |
+            signals/
+            paper/
           if-no-files-found: ignore
           retention-days: 60

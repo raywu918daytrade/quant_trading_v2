@@ -345,6 +345,10 @@ python3 scripts/webapp.py --live-dir signals       # 本機網頁: /api/live_ind
 - 部署完成 (2026-10-27): Secrets `HF_TOKEN` = HF.env 的 `HF_TOKEN_1` (raywu918daytrade, fine-grained 有 daytrade dataset 寫入權；daytrade.env 的 HF_TOKEN 屬 raywu918python, 沒有寫入權)。cron-job.org job 8734280 (live 08:50)、8734281 (nightly 21:00)、8734282 (nightly 08:10), 由 ray.env 的 `CORN_JOB_TOKEN_DAY_TRADE` 與 `GITHUB_DAY_TRADE` 建立。`scripts/hf_check.py <env 檔>` 可檢查 HF token 的帳號與寫入權 (不印值)。
 
 ## 永豐模擬環境自動執行 + 滑價紀錄 (2026-10-27) — `scripts/paper_orb.py` + `.github/workflows/paper.yml`
+
+> **2026-11-13 合併**: 模擬單不再是另一支程式。`live.yml` 跑 `orb_live.py run --paper`, 訊號與模擬單共用同一份名單 / 區間 / tick / `Book` (訊號事件直接轉成模擬委託), 兩邊不可能再出現名單或區間不同。
+> `paper.yml` 仍會被 cron-job.org 08:50 觸發, 但預設什麼都不做 (避免同一個模擬帳戶重複下單); 要單獨跑舊流程時手動 Run workflow 並填 `standalone=1`。
+> 模擬單那一側出錯只推 LINE、不影響訊號; 程式中斷時會先把模擬帳戶裡還開著的空單買回。永豐登入失敗時訊號改用 MIS 照跑, 當天不送模擬單。下面的流程說明除了「誰啟動」以外仍適用。
 目的: 量測實際滑價。回測假設在區間低成交, 滑 1 檔年均從 109 萬掉到 43 萬 (`stats/delay_drawdown.md`), 是否加「一檔 ≤0.15%」與部位配置都等這個數字。
 選股與進出場規則完全沿用 `orb_live.py` (`build_pool` / `open_stage` / `range_stage` / `Book`: 每日最多 10 檔、每檔 30 萬整數張、先跌破先做、12:00 後失效), 只把訊號換成永豐**模擬環境**委託。
 ```
