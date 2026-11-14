@@ -229,10 +229,18 @@ def compare_day(date, lv, TR, WT, DAYS):
                 n_live_only=sum(r["side"] == "live" for r in rows), n_bt_only=sum(r["side"] == "bt" for r in rows),
                 live_avg=la, bt_avg=ba, live_pnl=lp, bt_pnl=bp if bt_ready else None, diff_pnl=lp - bp if bt_ready else None, diff_avg=round(la - ba, 4) if la is not None and ba is not None else None,
                 both_live_avg=agg(both, "live")[0], both_bt_avg=agg(both, "bt")[0], entry_ticks_avg=round(float(np.mean(tk)), 2) if tk else None, note=note,
-                live_by_sid={r["stock_id"]: [r["name"], r["live"]["pnl"]] for r in live_rows if r["live"]["pnl"] is not None})
+                live_by_sid={r["stock_id"]: [r["name"], r["live"]["pnl"]] for r in live_rows if r["live"]["pnl"] is not None},
+                **perf_counts([r["live"] for r in live_rows], "live"))
     events = [{k: (num(v, 2) if k in ("price", "ref") else ("" if v != v else v)) for k, v in e.items()} for e in ev.to_dict("records")]
     excluded = [dict(stock_id=r["stock_id"], name=txt(r.get("name")), reason=txt(r.get("excluded"))) for r in lx.to_dict("records")]
     return summ, dict(date=date, summary=summ, rows=rows, events=events, excluded=excluded)
+
+
+def perf_counts(xs, pre):
+    """LINE「績效」卡用的每日計數 (worker 跨日加總): 已出場筆數、賺錢筆數 (含成本後 > 0)、停損筆數、報酬 % 加總 (算平均每筆)。"""
+    done = [x for x in xs if x and x.get("pnl") is not None and x.get("r_pct") is not None]
+    return {f"n_{pre}_done": len(done), f"n_{pre}_win": sum(x["pnl"] > 0 for x in done),
+            f"n_{pre}_stop": sum(str(x.get("reason", "")).startswith("停損") for x in done), f"{pre}_r_sum": round(sum(x["r_pct"] for x in done), 4)}
 
 
 def build_index(days):
@@ -266,26 +274,30 @@ def paper_vs_live(summ, paper):
     """訊號 vs 模擬單只比『兩邊都有做的股票』; 兩邊選到不同股票的部分 (09:05 一次多檔跌破時, MIS 10 秒輪詢與逐筆 tick 排出的先後不同) 另外列。
     11-04 例: 兩邊各 10 檔只重疊 5 檔, 總差 −27,793 裡約 −19,100 是選股不同, 不是下單造成的。"""
     lv = summ.get("live_by_sid") or {}
-    sim = {}
+    sim, sx = {}, []
     if paper is not None and len(paper) and "sim_pnl" in paper:
         d = paper[paper.sell_px.notna() & paper.buy_px.notna() & paper.sim_pnl.notna()]
         sim = {r.stock_id: [r.name, round(float(r.sim_pnl))] for r in d.itertuples()}
+        leg = d.exit_leg.astype(str) if "exit_leg" in d else pd.Series("", index=d.index)
+        pct = pd.to_numeric(d.sim_net_pct, errors="coerce") if "sim_net_pct" in d else pd.Series(np.nan, index=d.index)
+        pct = pct.fillna((1 - d.buy_px.astype(float) / d.sell_px.astype(float) - L.COST) * 100)     # 舊檔沒有 sim_net_pct 時自己算
+        sx = [dict(pnl=float(p), r_pct=float(r), reason="停損" if g == "stop" else "") for p, r, g in zip(d.sim_pnl, pct, leg) if np.isfinite(r)]
     both = sorted(set(lv) & set(sim))
     summ.update(has_paper=paper is not None, n_sim=len(sim), n_sim_both=len(both),
                 sim_pnl=round(sum(v[1] for v in sim.values())) if paper is not None else None,
                 live_both_pnl=round(sum(lv[s][1] for s in both)), sim_both_pnl=round(sum(sim[s][1] for s in both)),
-                live_only=[[s, *lv[s]] for s in lv if s not in sim], sim_only=[[s, *sim[s]] for s in sim if s not in lv])
+                live_only=[[s, *lv[s]] for s in lv if s not in sim], sim_only=[[s, *sim[s]] for s in sim if s not in lv], **perf_counts(sx, "sim"))
     return summ
 
 
 def build(src, TR, WT, DAYS, prev=None, rebuild=False, force=()):
     """回傳 (index, {date: detail}). prev = 上次的 live_index.json: 回測已就緒的日子沿用, 不重算 (只重算新日子、回測未就緒的、force 指定的、
-    以及舊格式沒有 live_by_sid 的). 模擬單對照每次都重算 (模擬單檔可能事後被 fix_close 改正)."""
+    以及舊格式沒有 n_live_win 績效計數的). 模擬單對照每次都重算 (模擬單檔可能事後被 fix_close 改正)."""
     old = {x["date"]: x for x in (prev or {}).get("days", [])} if not rebuild else {}
     days, details = [], {}
     pp = getattr(src, "paper", lambda d: None)
     for ds in src.dates():
-        if ds in old and old[ds].get("bt_ready") and "live_by_sid" in old[ds] and ds not in force:
+        if ds in old and old[ds].get("bt_ready") and "n_live_win" in old[ds] and ds not in force:   # 舊格式 (沒有績效計數) 重算一次
             summ = {k: v for k, v in old[ds].items() if k not in ("cum_live", "cum_bt")}
         else:
             summ, det = compare_day(ds, read_live(src, ds), TR, WT, DAYS); details[ds] = det
