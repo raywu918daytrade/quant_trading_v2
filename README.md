@@ -340,10 +340,10 @@ LINE 功能分三層, 之後擴充照這個放:
 | 層 | 誰觸發 | 程式 | 額度 |
 |---|---|---|---|
 | 推播 | 程式主動 (進場、停損、提醒、結算、不交易、出錯) | `scripts/orb_live.py` `Line` | 吃每月 push 額度 (免費 200 則) |
-| 選單 | 使用者點聊天室下方選單 (持倉 / 損益 / 績效 / 狀態 / 網頁) | `line_bot/setup_line.py richmenu` + `richmenu.png` | 不吃 |
-| 指令機器人 | 使用者打字 (持倉、損益、績效、狀態、網頁、說明、四碼代號) | `line_bot/worker.js` (Cloudflare Worker, webhook) | reply 免費 |
-- 機器人只讀已經上傳的 `db/orb/live.json` 與 `db/orb/paper/live.json`, 不碰交易程式；只回應 `LINE_USER_ID`。**加新指令**: 在 `worker.js` 的 `COMMANDS` 加一筆 `{ keys, desc, run(ctx) }` (ctx = { live, paper }), 回傳 `card({ title, sub, blocks, footer })` (blocks 用 `kv` / `stockRow` / `tile` / `note` / `sep` 積木, 外觀一致)；推上 main 後 `LINE bot deploy` workflow 先用 `line_bot/test/validate.mjs` 把每個指令的回覆丟給 LINE validate API 檢查格式, 通過才重新部署。改選單: 改 `setup_line.py` 的 `acts` 與重畫 `richmenu.png` (2500×843, 五格, 每格 500 寬)。
-- **績效** (2026-11-14): 打「績效」或在損益卡下方點快捷鈕。讀 `db/orb/web/live_index.json` (cloud_nightly 每晚重算, 收盤價已對 D1), 訊號 vs 模擬單: 累積損益、勝率 (含成本後賺錢筆數)、賺錢日、平均每筆、停損率、最大回撤、最佳/最差日、本週/本月、同期回測; 每日計數由 `export_live.perf_counts` 產生。資料品質分段 (11-12 前 MIS、11-10 異常) 寫在 worker.js `PERF_NOTES`。
+| 選單 | 使用者點聊天室下方選單 (今日 / 績效 / 狀態 / 網頁；2026-11-14 持倉併入今日) | `line_bot/setup_line.py richmenu` + `richmenu.png` | 不吃 |
+| 指令機器人 | 使用者打字 (今日 = 損益、持倉、績效、狀態、網頁、說明、四碼代號) | `line_bot/worker.js` (Cloudflare Worker, webhook) | reply 免費 |
+- 機器人只讀已經上傳的 `db/orb/live.json` 與 `db/orb/paper/live.json`, 不碰交易程式；只回應 `LINE_USER_ID`。**加新指令**: 在 `worker.js` 的 `COMMANDS` 加一筆 `{ keys, desc, run(ctx) }` (ctx = { live, paper }), 回傳 `card({ title, sub, blocks, footer })` (blocks 用 `kv` / `stockRow` / `tile` / `note` / `sep` 積木, 外觀一致)；推上 main 後 `LINE bot deploy` workflow 先用 `line_bot/test/validate.mjs` 把每個指令的回覆丟給 LINE validate API 檢查格式, 通過才重新部署。改選單: 改 `setup_line.py` 的 `acts` 與重畫 `richmenu.png` (2500×843, 四格)。
+- **績效** (2026-11-14): 點選單或打「績效」。讀 `db/orb/web/live_index.json` (cloud_nightly 每晚重算, 收盤價已對 D1), 訊號 vs 模擬單: 累積損益、勝率 (含成本後賺錢筆數)、賺錢日、平均每筆、停損率、最大回撤、最佳/最差日、本週/本月、同期回測; 每日計數由 `export_live.perf_counts` 產生。資料品質分段 (11-12 前 MIS、11-10 異常) 寫在 worker.js `PERF_NOTES`。
 - 手機頁: `web/today.html` (今日持倉 / 損益: 訊號與模擬單、持有中 / 已停損 / 已回補、已實現 + 未實現, 盤中每 20 秒重讀；點股票開 `chart.html`)。
 - **一次性設定**: (1) Cloudflare 免費帳號 → My Profile → API Tokens → Create Token → 範本「Edit Cloudflare Workers」(只留 Account 範圍, 刪掉 Zone policy) → 得到 token (2026-11-11 已建「orb-line-bot (GitHub Actions)」)；Account ID 已寫在 `line_bot/wrangler.toml`。(2) GitHub repo Secrets 加 `CLOUDFLARE_API_TOKEN`、`LINE_CHANNEL_SECRET` (LINE Developers → channel → Basic settings → Channel secret)。(3) GitHub → Actions → **LINE bot deploy** → Run workflow: 部署 worker、設 webhook 網址並測試、建立選單。(4) LINE Developers → Messaging API → 打開 **Use webhook**；LINE Official Account Manager → 回應設定 → 關掉「自動回應訊息」(不然每句都會多一則罐頭回覆)。
 

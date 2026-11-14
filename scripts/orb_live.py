@@ -506,9 +506,9 @@ def card_notrade(ds, title, reasons, info=None, n_cand=None, extra=""):
 def card_start(ds, info, watch):
     """09:05 開始監看: 精簡模式下盤中唯一一則, 之後進場 / 停損 / 損益都靠選單查 (選單回覆走 reply API, 不算額度)。"""
     blocks = [LC.tiles(LC.tile("監看", f"{len(watch)} 檔", "跌破區間低就放空"), LC.tile("大盤跳空", LC.pct(info["mkt_gap"] * 100), f"上漲家數 {info['breadth']*100:.0f}%", LC.color(info["mkt_gap"]))),
-              LC.note("進場會推通知; 停損、損益不推。\n點下方選單「持倉」「損益」隨時查看 (不佔推播額度)。")]
+              LC.note("進場會推通知; 停損、損益不推。\n點下方選單「今日」隨時查看 (不佔推播額度)。")]
     return LC.card("🟢 今日開始監看", blocks, sub=f"{ds} 09:05", kind="entry", footer=("📱 今日持倉頁", f"{SITE}/web/today.html"),
-                   alt=f"🟢 {ds} 開始監看 {len(watch)} 檔, 點下方選單「持倉」「損益」查看")
+                   alt=f"🟢 {ds} 開始監看 {len(watch)} 檔, 點下方選單「今日」查看")
 
 def card_src(use_tick):
     """訊號資料來源切換 (永豐 tick ↔ MIS 輪詢)。"""

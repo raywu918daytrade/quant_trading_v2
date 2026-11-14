@@ -12,8 +12,8 @@ const ACTIVE = ["盤前", "等待 09:05", "監看中", "等待收盤", "收盤�
 
 // ---------------- 指令表 ----------------
 const COMMANDS = [
-  { keys: ["持倉", "部位", "p", "pos"], desc: "持倉　目前持有中的部位 (訊號 + 模擬單)", run: (ctx) => positions(ctx, false) },
-  { keys: ["損益", "pnl", "$"], desc: "損益　今日已實現 + 未實現損益", run: (ctx) => positions(ctx, true) },
+  { keys: ["持倉", "部位", "p", "pos"], desc: "持倉　只看目前持有中的部位 (訊號 + 模擬單)", run: (ctx) => positions(ctx, false) },
+  { keys: ["今日", "損益", "today", "pnl", "$"], desc: "今日　今天的部位 (持有中排最上) 與已實現 + 未實現損益", run: (ctx) => positions(ctx, true) },
   { keys: ["績效", "統計", "勝率", "perf", "stats"], desc: "績效　上線以來勝率、累積損益、回撤", need: "index", run: perf },
   { keys: ["狀態", "status", "s"], desc: "狀態　程式現在跑到哪一步", run: status },
   { keys: ["網頁", "web", "w"], desc: "網頁　今日持倉頁 / 訊號頁 / 回測頁", run: () => [card({ title: "網頁", blocks: [link("今日持倉 / 損益", SITE + "today.html"), link("即時訊號 vs 模擬單", SITE + "index.html#live"), link("歷史回測", SITE + "index.html")] })] },
@@ -69,10 +69,10 @@ function notTrading(live) {
 function positions(ctx, withClosed) {
   const { live, paper } = ctx;
   const why = notTrading(live);
-  if (why) { const m = card({ title: withClosed ? "今日損益" : "目前持倉", sub: live ? `${live.date}` : "", blocks: [note(why)] }); return [withClosed ? quick(m, ["績效"]) : m]; }
+  if (why) return [card({ title: withClosed ? "今日損益" : "目前持倉", sub: live ? `${live.date}` : "", blocks: [note(why)] })];
   const S = sigRows(live), M = simRows(paper);
   const total = (rs, f = () => true) => rs.filter(f).reduce((a, r) => a + (r.pnl || 0), 0);
-  const pick = (rs) => (withClosed ? rs : rs.filter((r) => r.hold));
+  const pick = (rs) => (withClosed ? [...rs.filter((r) => r.hold), ...rs.filter((r) => !r.hold)] : rs.filter((r) => r.hold));   // 「今日」卡: 持有中的排最上面
   const tiles = [tile("即時訊號", withClosed ? total(S) : total(S, (r) => r.hold), withClosed ? `持有 ${S.filter((r) => r.hold).length} / 進場 ${S.length}` : `持有 ${S.filter((r) => r.hold).length} 檔`)];
   const nHeld = M.filter((r) => r.hold && !r.pending).length, nWait = M.filter((r) => r.pending).length, wait = nWait ? `　待成交/未下單 ${nWait}` : "";
   if (paper) tiles.push(tile("永豐模擬單", withClosed ? total(M) : total(M, (r) => r.hold), (withClosed ? `持有 ${nHeld} / 成交 ${M.length - nWait}` : `持有 ${nHeld} 檔`) + wait));
@@ -90,9 +90,8 @@ function positions(ctx, withClosed) {
     blocks.push(sep(), small(`訊號 ${sumLine(S)}` + (paper ? `\n模擬 ${sumLine(M)}` : "")));
   }
   const upd = live.updated_at ? live.updated_at.slice(11, 16) : "";
-  const msg = card({ title: withClosed ? "今日損益" : "目前持倉", sub: `${live.date}　${live.phase}${upd ? "　" + upd + " 更新" : ""}`, blocks,
-    footer: ["完整持倉頁", SITE + "today.html"], hint: "點股票看 K 線" });
-  return [withClosed ? quick(msg, ["績效"]) : msg];
+  return [card({ title: withClosed ? "今日損益" : "目前持倉", sub: `${live.date}　${live.phase}${upd ? "　" + upd + " 更新" : ""}`, blocks,
+    footer: ["完整持倉頁", SITE + "today.html"], hint: "點股票看 K 線" })];
 }
 // 上線績效: 讀 web/live_index.json 的每日資料跨日加總。訊號 = orb_live 盤中訊號 (每筆依 09:05 定的張數, 含成本 0.23%);
 // 模擬 = 永豐模擬帳戶實際成交 (收盤腳用真實收盤價)。資料品質分段寫在 PERF_NOTES, 卡片底下標出。
@@ -153,7 +152,7 @@ function perf(ctx) {
   const notes = [`訊號自 ${md(S.from)}${hasM ? `、模擬自 ${md(M.from)}` : ""} 起算，勝率 = 含成本 0.23% 後賺錢的筆數比例，每晚收盤價對帳後更新。`,
     ...PERF_NOTES.filter(([d]) => S.from && S.from <= d).map(([, t]) => t)];
   blocks.push(sep(), small(notes.join("\n")));
-  return [quick(card({ title: "上線績效", sub: `${md(S.from)} ~ ${md(last)} 收盤　每晚更新`, blocks, footer: ["累積曲線 / 每日明細", SITE + "index.html#live"] }), ["損益", "持倉"])];
+  return [card({ title: "上線績效", sub: `${md(S.from)} ~ ${md(last)} 收盤　每晚更新`, blocks, footer: ["累積曲線 / 每日明細", SITE + "index.html#live"] })];
 }
 function status(ctx) {
   const { live, paper } = ctx;
@@ -184,8 +183,6 @@ function help() {
 const UP = "#d33a33", DN = "#1a9e6a", INK = "#121212", INK2 = "#6b6a65", LINE_C = "#ececE8";
 const color = (v) => (ok(v) && v > 0 ? UP : ok(v) && v < 0 ? DN : INK);
 const link = (t, uri) => ({ type: "button", style: "link", height: "sm", action: { type: "uri", label: t, uri } });
-// 訊息下方的快捷按鈕 (quick reply): 點了等於打那個字, 回覆一樣不吃額度
-const quick = (msg, words) => ({ ...msg, quickReply: { items: words.map((w) => ({ type: "action", action: { type: "message", label: w, text: w } })) } });
 function text(t) { return { type: "text", text: t.slice(0, 5000) }; }
 const sep = () => ({ type: "separator", color: LINE_C, margin: "md" });
 const label = (t) => ({ type: "text", text: t, size: "xs", weight: "bold", color: INK2, margin: "md" });

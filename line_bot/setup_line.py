@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """LINE 官方帳號設定 (由 .github/workflows/line_bot.yml 執行, 也可本機跑):
-  richmenu           建立 / 更新聊天室下方的選單 (持倉 / 損益 / 績效 / 狀態 / 網頁), 設成預設; 舊的同名選單會刪掉
+  richmenu           建立 / 更新聊天室下方的選單 (今日 / 績效 / 狀態 / 網頁), 設成預設; 舊的同名選單會刪掉
   webhook <url>      把 Messaging API 的 webhook 網址設成 Cloudflare Worker, 並測試連線
 token 只從環境變數 LINE_CHANNEL_ACCESS_TOKEN 讀, 不印出。"""
 import json, os, sys
@@ -20,10 +20,10 @@ def call(method, url, **kw):
 def richmenu():
     for m in call("GET", f"{API}/richmenu/list").get("richmenus", []):
         if m.get("name") == NAME: call("DELETE", f"{API}/richmenu/{m['richMenuId']}"); print("刪除舊選單", m["richMenuId"])
-    acts = [{"type": "message", "text": "持倉"}, {"type": "message", "text": "損益"}, {"type": "message", "text": "績效"}, {"type": "message", "text": "狀態"},
+    acts = [{"type": "message", "text": "今日"}, {"type": "message", "text": "績效"}, {"type": "message", "text": "狀態"},
             {"type": "uri", "uri": SITE + "today.html"}]
     w = 2500 // len(acts)
-    body = {"size": {"width": 2500, "height": 843}, "selected": True, "name": NAME, "chatBarText": "查持倉 / 損益",
+    body = {"size": {"width": 2500, "height": 843}, "selected": True, "name": NAME, "chatBarText": "查今日 / 績效",
             "areas": [{"bounds": {"x": i * w, "y": 0, "width": w, "height": 843}, "action": a} for i, a in enumerate(acts)]}
     mid = call("POST", f"{API}/richmenu", json=body)["richMenuId"]
     img = (Path(__file__).parent / "richmenu.png").read_bytes()

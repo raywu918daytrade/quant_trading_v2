@@ -10,7 +10,7 @@ const index = JSON.parse(fs.readFileSync(dir + "live_index.json"));
 const ctx = async (need) => (need === "index" ? { index } : { live, paper });
 const tok = process.env.LINE_CHANNEL_ACCESS_TOKEN;
 let bad = 0;
-for (const q of ["持倉", "損益", "狀態", "網頁", "績效", "說明", "2603", "9999"]) {
+for (const q of ["持倉", "損益", "今日", "狀態", "網頁", "績效", "說明", "2603", "9999"]) {
   const messages = await handle(q, ctx);
   if (!tok) { console.log(q, JSON.stringify(messages).length, "bytes"); continue; }
   const r = await fetch("https://api.line.me/v2/bot/message/validate/reply", { method: "POST",
