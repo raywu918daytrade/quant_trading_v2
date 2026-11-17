@@ -7,7 +7,7 @@
   08:50   盤前池 (只用前一日以前 D1)
   09:02   證交所 MIS 抓開盤價 → 大盤平均跳空 / 候選; 登入永豐模擬環境, 訂閱候選的逐筆 tick
   09:05   MIS 區間高 / 低 → 監看名單 (同 orb_live 的 range_stage, 含當沖資格與開盤 5 分量濾網)
-  盤中    每筆 tick 丟進 orb_live.Book (每日最多 10 檔、每檔 30 萬整數張、先跌破先做、12:00 後失效):
+  盤中    每筆 tick 丟進 orb_live.Book (每格 30 萬 × 權重、整數張、當日累計 ≤10 格、先跌破先做、12:00 後失效):
             tick < 區間低 → 立即市價「現股當沖先賣」(daytrade_short)
             tick > 區間高 → 立即市價買回 (停損); 只買回券賣實際成交的張數, 未成交的券賣單先取消
           永豐沒有股票觸價單 API, 所以是「tick 偵測 → 市價單」, 並記錄偵測延遲 (收到 tick 的本機時間 − 交易所 tick 時間)
@@ -51,7 +51,7 @@ END_T = (13, 35, 0)
 LIVE_EVERY = 180              # 盤中至少每 3 分鐘上傳一次 live.json
 EVENT_GAP = 120               # 有事件時最快每 2 分鐘上傳一次 (HF 每個 repo 每小時最多 128 個 commit, live / paper / v1 共用)
                               # 11-12 曾試 60 秒, 但當天 09:54 已撞到 128 次/時上限 (429), 改回 120
-ORDER_WORKERS = 12            # 同時送單的執行緒數 (每日最多 10 檔 + 停損): 多檔同時跌破時並行送出, 不再一張等一張
+ORDER_WORKERS = 16            # 同時送單的執行緒數 (權重最小 0.75 格 → 每日最多 13 檔 + 停損): 多檔同時跌破時並行送出, 不再一張等一張
 
 
 def now(): return datetime.now(TZ)
@@ -328,7 +328,7 @@ class PaperOrb:
             self.leg[sid]["exit"] = dict(leg="stop", signal_px=p["rh"], trigger_px=e["tick_px"], tick_time=e["tick_time"], recv_time=e["recv_time"])
             self.cover(sid)
         elif e["event"] == "FULL":
-            log(f"{sid} {p['name']} 跌破但當日已滿 {self.book.max_n} 檔")
+            log(f"{sid} {p['name']} 跌破但當日資金 {self.book.max_n} 格已滿")
 
     def cover(self, sid, limit_px=None):
         """買回 = 券賣『實際成交』張數; 還沒成交的券賣單先取消 (避免回補後才成交變裸空)."""

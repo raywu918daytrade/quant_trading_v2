@@ -108,7 +108,7 @@
 <div id="tab-bt">
 <div class="chips recstats" id="stats"></div>
 <div class="eqwrap">
-  <div class="eqhead"><span>資金曲線 (固定 300 萬、每檔額度 30 萬、整數張、不複利)　點曲線跳到該日</span><span id="eqval"></span></div>
+  <div class="eqhead"><span>資金曲線 (固定 300 萬、每格 30 萬 × 權重、整數張、不複利)　點曲線跳到該日</span><span id="eqval"></span></div>
   <div id="eq"></div><div id="ddc"></div>
 </div>
 <div class="layout">
@@ -435,7 +435,7 @@ async function loadLive() {
   if (m.mkt_gap !== undefined && m.mkt_gap !== null) inf.push(`大盤跳空 ${pct(m.mkt_gap * 100)}`);
   if (m.n_cand !== undefined && m.n_cand !== null) inf.push(`候選 ${m.n_cand}`);
   if (m.n_watch !== undefined && m.n_watch !== null) inf.push(`監看 ${m.n_watch}`);
-  const slot = (b && b.slot) || (a && a.slot); if (slot) inf.push(`每檔額度 ${Math.round(slot / 1e4)} 萬`);
+  const slot = (b && b.slot) || (a && a.slot); if (slot) inf.push(`每格 ${Math.round(slot / 1e4)} 萬 × 權重`);
   if (a && a.realized) inf.push(`訊號已實現 ${a.realized.n} 筆 平均 ${pct(a.realized.avg_pct)} 合計 ${Math.round(a.realized.pnl).toLocaleString()} 元`);
   if (DAY_NOTES[m.date]) inf.push(DAY_NOTES[m.date]);
   if (a && a.note) inf.push(a.note);

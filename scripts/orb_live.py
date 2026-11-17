@@ -3,11 +3,11 @@
 規則來源: stats/orb_dn_deepdive.md (W=5 版本, 保守回測每筆 0.42%、Sharpe 2.7)。只產生訊號, 不下單。
 
 用法 (台灣時間):
-  python3 scripts/orb_live.py refresh                 # 盤前 (前一日 16:00 後或當日 08:40 前): 從 HF 更新最近 3 個月 D1
+  python3 scripts/orb_live.py refresh                 # 盤前 (前一日 16:00 後或當日 08:40 前): 從 HF 更新最近 15 個月 D1 (日K壓力要 250 日)
   python3 scripts/orb_live.py run                     # 08:50 後啟動, 自動走完 盤前池 → 09:02 開盤 → 09:05 區間 → 盤中監看 → 13:31 結算
   python3 scripts/orb_live.py pool [--date D]         # 只算盤前池
   python3 scripts/orb_live.py replay --date D         # 用歷史 M1 回放某一天 (與 run 同一套邏輯)
-  python3 scripts/orb_live.py verify --start A --end B  # 回放多日, 與回測 (14_orb_dn_deepdive) 逐筆對帳
+  python3 scripts/orb_live.py verify --start A --end B  # 回放多日, 與回測 (33_d1_sr_orb → d1_sr_orb.parquet, 研究 39 的規則) 逐筆對帳
   python3 scripts/orb_live.py line-test               # 推一則測試訊息到 LINE (確認 LINE_CHANNEL_ACCESS_TOKEN / LINE_USER_ID)
 
 規則:
@@ -15,7 +15,10 @@
   開盤: 今日跳空 ≥2%；非週一；大盤平均跳空 (20 日均成交額 ≥1 億的全部股票) ≥ −1%。
   09:05 記錄開盤 5 分鐘區間高 / 低與成交量；區間內已摸漲停或已到昨收 +8% 的剔除；
         開盤 5 分鐘量 < 前 20 日平均日量的 5% 的剔除 (2026-10-26 加入, 容易被來回洗, 見 stats/whipsaw.md)。
-  09:05 ~ 12:00 第一次跌破區間低 → 現沖券賣 (每日最多 10 檔, 先跌破先做)。
+        開盤 5 分鐘成交額 < 1.5 億、一檔占區間低 > 0.2% 的剔除 (2026-11-17 加入, 研究 39: 滑價下每筆剩太少)。
+  部位 (2026-11-17, 研究 39): 每格 = 資金/10；權重 = (區間寬 ≥2.1% → 2, 否則 1) × (區間高碰到日K壓力 → 1.5, 否則 0.75)；
+        張數 = 每格 × 權重 / 區間低 取整 (至少 1 張)。日K壓力 = 近 250 日擺盪高點 + 昨高 + 前 20/60/250 日高, 落在 (區間低, 區間高×1.003]。
+  09:05 ~ 12:00 第一次跌破區間低 → 現沖券賣 (先跌破先做; 當日權重累計 ≤10 格, 第一次放不下後當天不再進場)。
   反彈突破區間高 → 市價回補 (停損)；否則 13:25 前掛市價參加 13:30 收盤競價回補。
 """
 import argparse, atexit, glob, json, math, os, subprocess, sys, threading, time
@@ -36,7 +39,10 @@ UA = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
 
 P = dict(LIQ_DV20=1e8, POOL_DV20=3e8, ATR_MIN=0.03, PRICE_MIN=10.0, PRICE_MAX=300.0,
          GAP_MIN=0.02, MKT_GAP_MIN=-0.01, NO_DOW={0}, W=5, DEADLINE=180, MAX_N=10, O5_VR_MIN=0.05, DISP_N=3,
-         FORCE=0.08, STOP_SLIP=0.001, FORCE_SLIP=0.002, LOCK=0.07)
+         FORCE=0.08, STOP_SLIP=0.001, FORCE_SLIP=0.002, LOCK=0.07,
+         # 2026-11-17 研究 39 (stats/quality_sizing.md): 品質篩選 + 權重. MAX_N 改為「資金格數」(每格 = 資金/10, 權重累計 ≤ MAX_N)
+         O5_AMT_MIN=1.5e8, TICK_MAX_PCT=0.2, WIDE_MIN_PCT=2.1, W_WIDE=2.0, W_LVL_HIT=1.5, W_LVL_MISS=0.75, LVL_TOL=0.003,
+         PIV_K=5, PIV_N=250, D1_MONTHS=15)
 
 
 # ============================== 價格工具 ==============================
@@ -82,18 +88,22 @@ def m1_path(ym):
     lp, rp = LIVE / "m1" / f"{ym}.parquet", RAW / "m1" / f"{ym}.parquet"
     return lp if lp.exists() else rp
 
-def refresh(months=3, m1_months=1):
+def refresh(months=P["D1_MONTHS"], m1_months=1):
     from huggingface_hub import hf_hub_download
     (LIVE / "d1").mkdir(parents=True, exist_ok=True); (LIVE / "meta").mkdir(parents=True, exist_ok=True)
     today = pd.Timestamp(now_tw().date())
-    for i in range(months):
-        ym = (today - pd.DateOffset(months=i)).strftime("%Y_%m")
-        try:
-            p = hf_hub_download(REPO, f"db/d1/{ym}.parquet", repo_type="dataset", force_download=True)
-            (LIVE / "d1" / f"{ym}.parquet").write_bytes(Path(p).read_bytes())
-            print(f"更新 D1 {ym}: 最後日期 {pd.read_parquet(LIVE / 'd1' / f'{ym}.parquet').date.max()}")
-        except Exception as e:
-            print(f"D1 {ym} 下載失敗: {e}")
+    from concurrent.futures import ThreadPoolExecutor
+    def get_d1(ym):                                       # 15 個月並行下載 + 重試 (08:50 盤前不能拖到 09:02)
+        for k in range(3):
+            try:
+                p = hf_hub_download(REPO, f"db/d1/{ym}.parquet", repo_type="dataset", force_download=True)
+                (LIVE / "d1" / f"{ym}.parquet").write_bytes(Path(p).read_bytes())
+                return f"更新 D1 {ym}: 最後日期 {pd.read_parquet(LIVE / 'd1' / f'{ym}.parquet').date.max()}"
+            except Exception as e:
+                err = e; time.sleep(2 * (k + 1))
+        return f"⚠ D1 {ym} 下載失敗 (重試 3 次): {err}"
+    with ThreadPoolExecutor(6) as ex:
+        for msg in ex.map(get_d1, [(today - pd.DateOffset(months=i)).strftime("%Y_%m") for i in range(months)]): print(msg)
     p = hf_hub_download(REPO, "db/info/info.parquet", repo_type="dataset", force_download=True)
     (LIVE / "meta" / "info.parquet").write_bytes(Path(p).read_bytes())
     print("更新 info.parquet")
@@ -125,7 +135,27 @@ def build_pool(d1, date):
     a["in_pool"] = (a.dv20 >= P["POOL_DV20"]) & (a.atr20 >= P["ATR_MIN"]) & (a.pc >= P["PRICE_MIN"]) & (a.pc <= P["PRICE_MAX"])
     a["limit_up"] = a.pc.map(limit_up)
     a["force_px"] = a.pc * (1 + P["FORCE"])
+    lv = d1_levels(h, a.stock_id[a.in_pool])                 # 盤前算好, 09:05 只做比對 (不增加 09:05 → 送單的延遲)
+    a["res_lv"] = a.stock_id.map(lv)
     return a.reset_index(drop=True), h.date.max()
+
+def d1_levels(h, sids):
+    """盤前: 每檔日K壓力價位 (同研究 33 / 39): 近 PIV_N 日擺盪高點 (前後各 PIV_K 根內最高, 第 i+K 日收盤後才確認) + 昨高 + 前 20 / 60 / 250 日最高.
+    h = 今天以前的 D1 (需 ≥ PIV_N + PIV_K 日, 不足時 250 日高 / 較早的擺盪點會缺, 權重偏少 → cmd_pool 會警告)."""
+    from numpy.lib.stride_tricks import sliding_window_view as swv
+    K, N = P["PIV_K"], P["PIV_N"]
+    out = {}
+    x = h[h.stock_id.isin(set(sids)) & (h.high > 0) & (h.close > 0)]
+    for sid, g in x.groupby("stock_id", sort=False):
+        hi = g.high.to_numpy("float64"); n = len(hi)
+        lv = []
+        if n >= 2 * K + 1:
+            ih = np.where(hi[K:n - K] >= swv(hi, 2 * K + 1).max(1))[0] + K
+            lv.append(hi[ih[ih >= n - N]])
+        lv.append(hi[-1:])
+        lv += [hi[-m:].max(keepdims=True) for m in (20, 60, 250) if n >= m]
+        v = np.concatenate(lv); out[sid] = v[np.isfinite(v)]
+    return out
 
 
 # ============================== 開盤 / 區間 ==============================
@@ -147,7 +177,7 @@ def open_stage(pool, opens, date):
         x["pc"] = x.pc.astype("float64")      # D1 是 float32, 新版 pandas 塞 float64 的 y 會直接 TypeError (2026-11-10 盤中中斷)
         x.loc[ok, "pc"] = x.loc[ok, "y"].astype("float64")
         x["limit_up"] = x.pc.map(limit_up); x["force_px"] = x.pc * (1 + P["FORCE"])
-    x["gap"] = x.open / x.pc - 1
+    x["gap"] = x.open.astype("float64") / x.pc.astype("float64") - 1      # D1 是 float32: 跳空剛好 2% 時 61.2/60 會算成 1.99999%, 與回測 / 盤中 (float64) 不一致
     mkt_gap = x.gap.mean()
     breadth = (x.gap > 0).mean()
     cand = x[x.in_pool & (x.gap >= P["GAP_MIN"])].copy()
@@ -182,6 +212,16 @@ def range_stage(cand, rng, lu_mode="tick", eligible=None):
     if "o5_v" in c.columns:                                                   # 張 → 股, 對前 20 日均量 (股)
         c["o5_vr"] = c.o5_v * 1000 / c.vol20
         why[(why == "") & (c.o5_vr < P["O5_VR_MIN"])] = f"開盤 5 分量 < 日均量 {P['O5_VR_MIN']*100:.0f}%"
+        c["o5_amt"] = c.o5_v * 1000 * c.rl                                    # 元 (≈ 量 × 區間低, 同研究 39)
+        why[(why == "") & (c.o5_amt / 1e8 < P["O5_AMT_MIN"] / 1e8)] = f"開盤 5 分成交額 < {P['O5_AMT_MIN']/1e8:g} 億"
+    c["tick_pct"] = c.rl.map(lambda v: tick_size(v) if np.isfinite(v) and v > 0 else np.nan) / c.rl * 100
+    why[(why == "") & (c.tick_pct > P["TICK_MAX_PCT"])] = f"一檔占股價 > {P['TICK_MAX_PCT']:g}%"
+    # 權重 (研究 39): 區間寬 × 區間高碰日K壓力
+    c["width_pct"] = (c.rh / c.rl - 1) * 100
+    lvs = c["res_lv"] if "res_lv" in c.columns else pd.Series([None] * len(c), index=c.index)
+    c["lvl_in"] = [bool(isinstance(v, np.ndarray) and len(v) and np.any((v > lo) & (v <= hi * (1 + P["LVL_TOL"])))) for v, lo, hi in zip(lvs, c.rl, c.rh)]
+    c["w"] = np.where(c.width_pct >= P["WIDE_MIN_PCT"], P["W_WIDE"], 1.0) * np.where(c.lvl_in, P["W_LVL_HIT"], P["W_LVL_MISS"])
+    c = c.drop(columns=["res_lv"], errors="ignore")
     if eligible is not None:
         why[(why == "") & ~c.stock_id.map(lambda s: eligible.get(s) is True)] = "不可現沖券賣"
     c["excluded"] = why
@@ -189,18 +229,24 @@ def range_stage(cand, rng, lu_mode="tick", eligible=None):
 
 
 # ============================== 盤中狀態機 ==============================
+def _w(r):
+    w = getattr(r, "w", 1.0)
+    return float(w) if w is not None and np.isfinite(w) and w > 0 else 1.0
+
 class Book:
     """每檔: WAIT → SHORT → (STOP 停損 | CLOSE 收盤回補). WAIT 在 12:00 後或額滿時失效.
     step() 的輸入是一段期間 (回放 = 1 分 K; 即時 = 兩次輪詢之間) 的 最低 lo / 最高 hi / 第一價 first / 最後價 last."""
 
     def __init__(self, watch, mode, capital=3_000_000, max_n=None, log=None):
         self.mode = mode; self.max_n = max_n or P["MAX_N"]; self.n_entered = 0; self.log = log
-        self.slot = capital / self.max_n
+        self.slot = capital / self.max_n                         # 每格; 每檔 = 每格 × 權重 w
+        self.used = 0.0; self.full = False                       # 已用格數; 第一次放不下後當天不再進場 (同研究 39 的累計 ≤10 格)
+        if len(watch) and "w" not in watch.columns: print("⚠ 監看名單沒有權重 w (不是經 range_stage 產生?), 每檔一律 1 格")
         self.s = {}
         for r in watch.itertuples():
             self.s[r.stock_id] = dict(sid=r.stock_id, name=r.name, pc=r.pc, gap=r.gap, rh=r.rh, rl=r.rl, fpx=r.force_px, lu=r.lu, state="WAIT",
                                       entry_t=np.nan, entry_px=np.nan, exit_t=np.nan, exit_px=np.nan, reason="", forced=False, locked=False,
-                                      lots=max(int(self.slot // (r.rl * 1000)), 1))   # 股價 >300 時 30 萬不足 1 張, 至少做 1 張
+                                      w=_w(r), lots=max(int(self.slot * _w(r) // (r.rl * 1000)), 1))   # 額度不足 1 張時至少做 1 張
         self.events = []
 
     def _ev(self, t, sid, ev, px, ref, note=""):
@@ -219,12 +265,13 @@ class Book:
             if t >= P["DEADLINE"] + 1:
                 p["state"] = "EXPIRED"; return
             if lo < p["rl"]:
-                if self.n_entered >= self.max_n:
-                    p["state"] = "FULL"; self._ev(t, sid, "FULL", last, p["rl"], "跌破但當日已滿 10 檔"); return
-                p["state"] = "SHORT"; self.n_entered += 1
+                if self.full or self.used + p["w"] > self.max_n + 1e-9:
+                    self.full = True
+                    p["state"] = "FULL"; self._ev(t, sid, "FULL", last, p["rl"], f"跌破但當日資金已滿 (已用 {self.used:g}/{self.max_n} 格, 本檔 {p['w']:g} 格)"); return
+                p["state"] = "SHORT"; self.n_entered += 1; self.used += p["w"]
                 p["entry_t"] = t
                 p["entry_px"] = min(p["rl"], first) if self.mode == "bar" else (min(p["rl"], last) if np.isfinite(last) else p["rl"])   # MIS z 可能是舊的 (11-12 立碁記成 82.6 > 區間低 80.7), 不高於區間低
-                self._ev(t, sid, "SHORT", p["entry_px"], p["rl"], f"跌破區間低 {p['rl']:g} → 現沖券賣 {p['lots']} 張; 停損 {p['rh']:g}")
+                self._ev(t, sid, "SHORT", p["entry_px"], p["rl"], f"跌破區間低 {p['rl']:g} → 現沖券賣 {p['lots']} 張 ({p['w']:g} 格); 停損 {p['rh']:g}")
             return                                                  # 進場那一段不檢查停損 (與回測一致)
         if p["state"] == "SHORT" and hi > p["rh"]:
             px = max(p["rh"], first) * (1 + P["STOP_SLIP"]) if self.mode == "bar" else (max(p["rh"], last) if np.isfinite(last) else p["rh"])   # 同上, 停損價不低於區間高
@@ -247,7 +294,7 @@ class Book:
             if not np.isfinite(p["entry_px"]): continue
             r = -(p["exit_px"] / p["entry_px"] - 1) - COST - (P["LOCK"] if p["locked"] else 0)
             rows.append(dict(stock_id=p["sid"], name=p["name"], gap=p["gap"], rl=p["rl"], rh=p["rh"], entry_t=p["entry_t"], entry_px=p["entry_px"],
-                             exit_t=p["exit_t"], exit_px=p["exit_px"], reason=p["reason"], forced=p["forced"], locked=p["locked"], lots=p["lots"],
+                             exit_t=p["exit_t"], exit_px=p["exit_px"], reason=p["reason"], forced=p["forced"], locked=p["locked"], lots=p["lots"], w=p["w"],
                              r_pct=r * 100, pnl=r * p["entry_px"] * p["lots"] * 1000))      # 元; 含成本與鎖漲停罰金
         return pd.DataFrame(rows)
 
@@ -582,11 +629,11 @@ def live_state(ds, phase, info=None, book=None, mem=None, excl=None, cand=None, 
 
 # ============================== 輸出 ==============================
 def fmt_watch(w):
-    cols = ["stock_id", "name", "pc", "open", "gap", "atr20", "rl", "rh", "force_px", "lots"]
+    cols = ["stock_id", "name", "pc", "open", "gap", "atr20", "rl", "rh", "force_px", "w", "lots"]
     x = w.copy(); x["gap"] = (x.gap * 100).round(2); x["atr20"] = (x.atr20 * 100).round(1)
     if "lots" not in x.columns: x["lots"] = ""
     return x[[c for c in cols if c in x.columns]].rename(columns={"stock_id": "代號", "name": "名稱", "pc": "昨收", "open": "開盤", "gap": "跳空%", "atr20": "ATR%",
-                                                                  "rl": "區間低(進場)", "rh": "區間高(停損)", "force_px": "+8%", "lots": "張"}).to_string(index=False)
+                                                                  "rl": "區間低(進場)", "rh": "區間高(停損)", "force_px": "+8%", "w": "格", "lots": "張"}).to_string(index=False)
 
 def summarize(tr, date, out_dir, info):
     lines = [f"===== {date} 結算 =====", f"大盤平均跳空 {info.get('mkt_gap', np.nan)*100:.2f}%  候選 {info.get('n_cand', 0)}  監看 {info.get('n_watch', 0)}  進場 {len(tr)}"]
@@ -627,44 +674,34 @@ def replay_day(date, d1, m1, eligible=None, verbose=False):
 
 
 def expected_trades(start, end):
-    """回測 (14_orb_dn_deepdive: W=5, 跳空≥2% ∩ ATR≥3%, 停損區間高, 可執行濾網, 開盤 5 分量 ≥ 日均量 5%, 排除處置股, 每日前 10 檔) 的逐筆結果, 供對帳."""
-    f = pd.read_parquet(PROC / "d1_feat.parquet", columns=["stock_id", "date", "univ", "pc", "gap", "atr20", "dv20", "vol20", "mkt_gap", "dow"])
-    f = f[f.univ & (f.date >= start) & (f.date <= end)]
-    yms = sorted({d.strftime("%Y_%m") for d in pd.to_datetime(f.date.unique())})
-    cols = ["stock_id", "date", "auc_c", "o5_h", "o5_l", "o5_v", "dn5_t", "dn5_px", "dn5_hi_after", "dn5_stop_hi_px", "dn5_stop_hi_open"]
-    orb = pd.concat([pd.read_parquet(PROC / "orb_dn" / f"{ym}.parquet", columns=cols) for ym in yms], ignore_index=True)
-    s = f.merge(orb, on=["stock_id", "date"]); s = s[s.auc_c.notna()]
-    lu = s.pc * 1.1; fpx = s.pc * 1.08
-    s = s[(s.gap >= 0.02) & (s.atr20 >= 0.03) & (s.dow != 0) & (s.mkt_gap >= -0.01) & (s.dv20 >= 3e8) & (s.pc <= 300) & s.dn5_t.notna() & (s.dn5_t <= 180)
-          & (s.o5_h < lu * 0.999) & (s.o5_h < fpx) & (s.dn5_px < fpx) & (s.o5_v * 1000 / s.vol20 >= P["O5_VR_MIN"])].copy()
-    # 處置股 (分盤撮合): 開盤 5 分只有 ≤3 根一字線 → 剔除 (orb_dn 特徵檔沒有, 從 1 分 K 算)
-    disp = []
-    for ym, g in s.groupby(s.date.dt.strftime("%Y_%m")):
-        m = pd.read_parquet(m1_path(ym), filters=[("stock_id", "in", sorted(g.stock_id.unique()))], columns=["stock_id", "date", "open", "high", "low", "close", "volume"])
-        m["ts"] = pd.to_datetime(m.date); m["date"] = m.ts.dt.normalize(); m["t"] = m.ts.dt.hour * 60 + m.ts.dt.minute - 540
-        m = m[(m.t >= 0) & (m.t < P["W"])].assign(flat=lambda x: (x.open == x.high) & (x.high == x.low) & (x.low == x.close))
-        disp.append(m.groupby(["stock_id", "date"]).agg(o5_n=("t", "size"), o5_flat=("flat", "all")).reset_index())
-    s = s.merge(pd.concat(disp, ignore_index=True), on=["stock_id", "date"], how="left")
-    s = s[~((s.o5_n <= P["DISP_N"]) & (s.o5_flat == True))].copy()
-    lu = s.pc * 1.1; fpx = s.pc * 1.08
-    st = np.maximum(s.dn5_stop_hi_px, s.dn5_stop_hi_open) * (1 + P["STOP_SLIP"])
-    ex = st.where(st.notna(), s.auc_c)
-    hi = s.dn5_hi_after.where(st.isna(), np.minimum(s.dn5_hi_after, st))
-    forced = hi >= fpx; exf = np.where(forced, fpx * (1 + P["FORCE_SLIP"]), ex); locked = (~forced) & (exf >= lu * 0.999)
-    s["r_pct"] = (-(exf / s.dn5_px - 1) - COST - np.where(locked, P["LOCK"], 0)) * 100
-    s = s.sort_values(["date", "dn5_t", "stock_id"])
-    return s.groupby("date").head(P["MAX_N"])[["date", "stock_id", "dn5_t", "dn5_px", "r_pct"]]
+    """回測的逐筆結果, 供對帳: data/processed/d1_sr_orb.parquet (先跑 scripts/33_d1_sr_orb.py; 每檔每日 ORB5 空單結果 + 日K壓力 lvl_in)
+    套現行規則 (同研究 39 的「砍成交額 + 砍一檔 + 區間寬加權 + 碰壓力加權, 累計 ≤10 格」, 門檻用 P 的常數)."""
+    s = pd.read_parquet(PROC / "d1_sr_orb.parquet"); s["date"] = pd.to_datetime(s.date)
+    s = s[s.s_ok & (s.date >= start) & (s.date <= end) & (s.dv20 >= P["POOL_DV20"]) & (s.atr20 >= P["ATR_MIN"]) & (s.pc <= P["PRICE_MAX"])
+          & (s.gap >= P["GAP_MIN"]) & (s.dow != 0) & (s.mkt_gap >= P["MKT_GAP_MIN"])].copy()
+    s = s[(s.o5_v * 1000 * s.rl / 1e8 >= P["O5_AMT_MIN"] / 1e8) & (s.rl.map(tick_size) / s.rl * 100 <= P["TICK_MAX_PCT"])].copy()
+    s["w"] = np.where((s.rh / s.rl - 1) * 100 >= P["WIDE_MIN_PCT"], P["W_WIDE"], 1.0) * np.where(s.lvl_in.fillna(0) > 0, P["W_LVL_HIT"], P["W_LVL_MISS"])
+    s = s.sort_values(["date", "s_et", "stock_id"])
+    s = s[s.groupby("date").w.cumsum() <= P["MAX_N"] + 1e-9]
+    return s.rename(columns={"s_et": "dn5_t", "s_px": "dn5_px", "s_r": "r_pct"})[["date", "stock_id", "dn5_t", "dn5_px", "r_pct", "w"]].reset_index(drop=True)
 
 
 # ============================== 指令 ==============================
 def cmd_pool(a):
     date = pd.Timestamp(a.date or now_tw().date())
-    d1 = load_d1(since=(date - pd.DateOffset(months=4)).strftime("%Y_%m"))
+    d1 = load_d1(since=(date - pd.DateOffset(months=P["D1_MONTHS"])).strftime("%Y_%m"))
     pool, last = build_pool(d1, date)
     SIG.mkdir(exist_ok=True); pool.to_csv(SIG / f"{date.date()}_pool.csv", index=False)
     p = pool[pool.in_pool]
     print(f"{date.date()} 盤前池: D1 最後日期 {last.date()}；流動股 {len(pool)} 檔 (算大盤跳空用)；池內 {len(p)} 檔 (ATR≥3%、成交額≥3億、股價 10~300)")
     if (date - last).days > 4: print(f"⚠ D1 最後日期 {last.date()} 距今 {(date - last).days} 天, 請先執行 refresh")
+    have = set(d1.date.dt.strftime("%Y_%m")); want = {(date - pd.DateOffset(months=i)).strftime("%Y_%m") for i in range(1, P["D1_MONTHS"])}
+    if want - have:                                      # 中間缺月: 250 日高 / 擺盪點時間窗會錯位, 碰壓力權重和回測不同
+        print(f"⚠ D1 缺月份 {sorted(want - have)}: 日K壓力 (碰壓力 1.5 / 0.75 格) 可能算錯, 請重跑 refresh --months {P['D1_MONTHS']}")
+    nd = d1[d1.date < date].groupby("stock_id").size().reindex(p.stock_id).fillna(0)
+    short = int((nd < P["PIV_N"] + P["PIV_K"]).sum())
+    if short > len(p) * 0.2:                             # 少數新上市股本來就不足; 大量不足 = refresh 月數不夠, 壓力權重會偏少
+        print(f"⚠ 池內 {short}/{len(p)} 檔 D1 不足 {P['PIV_N'] + P['PIV_K']} 日 (最早 {d1.date.min().date()}), 日K壓力會缺; 請 refresh --months {P['D1_MONTHS']}")
     return pool, last
 
 def wait_until(hh, mm, ss=0):
@@ -896,7 +933,7 @@ def _run(a, line):
     book = Book(watch, "live", capital=a.capital, log=None)
     watch["lots"] = watch.stock_id.map(lambda s: book.s[s]["lots"])
     watch.to_csv(SIG / f"{ds}_watch.csv", index=False); excl.to_csv(SIG / f"{ds}_excluded.csv", index=False)
-    print(f"\n09:05 監看名單 {len(watch)} 檔 (每檔額度 {book.slot:,.0f} 元):\n" + (fmt_watch(watch) if len(watch) else "(無)"))
+    print(f"\n09:05 監看名單 {len(watch)} 檔 (每格 {book.slot:,.0f} 元 × 權重, 當日累計 ≤{book.max_n} 格):\n" + (fmt_watch(watch) if len(watch) else "(無)"))
     if len(excl): print("剔除: " + ", ".join(f"{r.stock_id}{r.name}({r.excluded})" for r in excl.itertuples()))
     mem = {r.stock_id: dict(h=r.rh, l=r.rl, z=np.nan) for r in watch.itertuples()}
     book.bars = Bars()
@@ -1085,7 +1122,7 @@ def cmd_line_test(a):
 
 def cmd_replay(a):
     date = pd.Timestamp(a.date)
-    d1 = load_d1(since=(date - pd.DateOffset(months=4)).strftime("%Y_%m"))
+    d1 = load_d1(since=(date - pd.DateOffset(months=P["D1_MONTHS"])).strftime("%Y_%m"))
     m1 = load_m1_month(date.strftime("%Y_%m"))
     elig = fetch_eligible(str(date.date())) if a.eligibility else None
     print(f"===== 回放 {date.date()} =====")
@@ -1100,7 +1137,7 @@ def cmd_replay(a):
 def cmd_verify(a):
     start, end = pd.Timestamp(a.start), pd.Timestamp(a.end)
     exp = expected_trades(start, end)
-    d1 = load_d1(since=(start - pd.DateOffset(months=4)).strftime("%Y_%m"))
+    d1 = load_d1(since=(start - pd.DateOffset(months=P["D1_MONTHS"])).strftime("%Y_%m"))
     days = sorted(d for d in d1.date.unique() if start <= d <= end)
     got = []; t0 = time.time()
     for ym, grp in pd.Series(days).groupby(pd.Series(days).dt.strftime("%Y_%m")):
@@ -1109,16 +1146,16 @@ def cmd_verify(a):
             tr, info, _, _ = replay_day(d, d1, m1)
             if len(tr): tr["date"] = d; got.append(tr)
         print(f"{ym} 完成 ({time.time() - t0:.0f}s)", flush=True)
-    got = pd.concat(got, ignore_index=True) if got else pd.DataFrame(columns=["date", "stock_id", "r_pct"])
-    m = exp.merge(got[["date", "stock_id", "entry_t", "entry_px", "r_pct"]], on=["date", "stock_id"], how="outer", suffixes=("_bt", "_live"), indicator=True)
+    got = pd.concat(got, ignore_index=True) if got else pd.DataFrame(columns=["date", "stock_id", "entry_t", "entry_px", "r_pct", "w"])
+    m = exp.merge(got[["date", "stock_id", "entry_t", "entry_px", "r_pct", "w"]], on=["date", "stock_id"], how="outer", suffixes=("_bt", "_live"), indicator=True)
     both = m[m._merge == "both"]
     diff = (both.r_pct_bt - both.r_pct_live).abs()
     lines = [f"# 對帳 {start.date()} ~ {end.date()}", "",
              f"- 回測筆數 {len(exp)}, 回放筆數 {len(got)}, 兩邊都有 {len(both)}, 只在回測 {int((m._merge == 'left_only').sum())}, 只在回放 {int((m._merge == 'right_only').sum())}",
              f"- 兩邊都有的筆: 每筆報酬差 |Δ| 平均 {diff.mean():.4f} 個百分點, 最大 {diff.max():.4f}；差 >0.01 的 {int((diff > 0.01).sum())} 筆",
-             f"- 平均每筆: 回測 {exp.r_pct.mean():.3f}%  回放 {got.r_pct.mean():.3f}%"]
+             f"- 平均每筆: 回測 {exp.r_pct.mean():.3f}%  回放 {got.r_pct.mean():.3f}%；權重不同 {int((both.w_bt != both.w_live).sum())} 筆"]
     print("\n".join(lines))
-    bad = m[(m._merge != "both") | ((m.r_pct_bt - m.r_pct_live).abs() > 0.01)]
+    bad = m[(m._merge != "both") | ((m.r_pct_bt - m.r_pct_live).abs() > 0.01) | (m.w_bt != m.w_live)]
     if len(bad): print(bad.head(20).to_string(index=False))
     (SIG / "replay").mkdir(parents=True, exist_ok=True)
     m.to_csv(SIG / "replay" / f"verify_{start.date()}_{end.date()}.csv", index=False)
@@ -1127,10 +1164,10 @@ def cmd_verify(a):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sp = ap.add_subparsers(dest="cmd", required=True)
-    p = sp.add_parser("refresh"); p.add_argument("--months", type=int, default=3); p.add_argument("--m1-months", type=int, default=1)
+    p = sp.add_parser("refresh"); p.add_argument("--months", type=int, default=P["D1_MONTHS"]); p.add_argument("--m1-months", type=int, default=1)
     p = sp.add_parser("pool"); p.add_argument("--date")
     p = sp.add_parser("run")
-    p.add_argument("--capital", type=float, default=3_000_000, help="總資金, 每檔額度 = 資金/10")
+    p.add_argument("--capital", type=float, default=3_000_000, help="總資金, 每格 = 資金/10, 每檔 = 每格 × 權重 (0.75 / 1.5 / 3)")
     p.add_argument("--poll", type=float, default=10, help="輪詢秒數 (MIS 備援時)")
     p.add_argument("--tick-poll", type=float, default=2, help="用永豐 tick 時主迴圈 (發布 / LINE / 提醒) 的間隔秒數")
     p.add_argument("--paper", action="store_true", help="同一支程式順便在永豐『模擬環境』下單 (paper_orb.PaperOrb): 同一份名單 / 區間 / tick, 結果寫 paper/ 並上傳 HF db/orb/paper/")

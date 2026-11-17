@@ -26,8 +26,8 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
       - run: pip install -q -r requirements.txt shioaji   # 訊號端改用永豐 tick (2026-11-12), 只用模擬環境登入收報價
-      - name: Refresh D1 (last 3 months) from HF
-        run: python3 -W ignore scripts/orb_live.py refresh --months 3 --m1-months 0
+      - name: Refresh D1 (last 15 months, 250-day resistance levels) from HF
+        run: python3 -W ignore scripts/orb_live.py refresh --months 15 --m1-months 0
       - name: Run live (publish to HF)
         id: run
         env:

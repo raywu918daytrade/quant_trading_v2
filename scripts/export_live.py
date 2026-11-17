@@ -23,7 +23,7 @@ from config import ROOT, PROC, HF_REPO, HF_PREFIX
 OUT = ROOT / "data" / "web_export"
 KINDS = ["trades", "events", "watch", "excluded", "cand"]
 EV_COLS = ["time", "stock_id", "name", "event", "price", "ref", "note"]
-BT_STATE = {"WAIT": "回測未跌破區間低", "EXPIRED": "回測未跌破區間低", "FULL": "回測跌破但已滿 10 檔"}
+BT_STATE = {"WAIT": "回測未跌破區間低", "EXPIRED": "回測未跌破區間低", "FULL": "回測跌破但當日資金已滿"}
 
 
 # ============================== 實盤來源 ==============================
@@ -188,7 +188,7 @@ def compare_day(date, lv, TR, WT, DAYS):
     def why_no_live(sid):
         if lv["status"] == "不交易": return "實盤判定不交易"
         if lv["status"] == "無資料": return "沒有實盤檔"
-        if sid in full: return "實盤跌破但已滿 10 檔"
+        if sid in full: return "實盤跌破但當日資金已滿"
         x = lx[lx.stock_id == sid]
         if len(x): return f"實盤剔除 ({txt(x.excluded.iloc[0])})" if "excluded" in x.columns else "實盤剔除"
         if sid in set(lw.stock_id): return "實盤監看中但 12:00 前未偵測到跌破"

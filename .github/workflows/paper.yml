@@ -36,9 +36,9 @@ jobs:
           cache-dependency-path: requirements.txt
       - if: github.event.inputs.standalone == '1'
         run: pip install -q -r requirements.txt shioaji
-      - name: Refresh D1 (last 3 months) from HF
+      - name: Refresh D1 (last 15 months, 250-day resistance levels) from HF
         if: github.event.inputs.standalone == '1'
-        run: python3 -W ignore scripts/orb_live.py refresh --months 3 --m1-months 0
+        run: python3 -W ignore scripts/orb_live.py refresh --months 15 --m1-months 0
       - name: Run paper trading in Sinopac simulation (publish to HF)
         if: github.event.inputs.standalone == '1'
         env:

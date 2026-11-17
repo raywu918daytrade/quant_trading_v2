@@ -2,13 +2,18 @@ name: Nightly history update
 on:
   # cron-job.org 平日台灣 21:00 與隔天 08:10 各打一次 (HF 分 K 更新時間不固定; 增量更新, 重複跑沒關係)。
   workflow_dispatch:
+    inputs:
+      full:
+        description: "全部重建歷史 / 網頁 / 實盤紀錄 (規則改了才勾; 下載全部 D1 / M1)"
+        type: boolean
+        default: false
 concurrency:
   group: orb-nightly
   cancel-in-progress: false
 jobs:
   nightly:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 180
     env:
       TZ: Asia/Taipei
       HF_HUB_DISABLE_PROGRESS_BARS: "1"
@@ -26,4 +31,4 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-        run: python3 -W ignore scripts/cloud_nightly.py
+        run: python3 -W ignore scripts/cloud_nightly.py ${{ inputs.full && '--full' || '' }}

@@ -11,6 +11,7 @@
   6. 一個 commit 上傳 history parquet + 新 JSON 到 HF (沒有新交易日時只上傳實盤紀錄)
 需環境變數 HF_TOKEN (HF 寫入權限)。本機也可跑 (會用本機已有的歷史, 不先下載): python3 scripts/cloud_nightly.py --local
 首次部署 (本機, 一次): HF_TOKEN=... python3 scripts/cloud_nightly.py --seed   → 上傳本機歷史 parquet + data/web_export/ 全部 (先跑 export_web.py --all)
+規則改了 (例: 2026-11-17 研究 39 的篩選 + 權重): --full → 下載全部 D1 / M1, 歷史全部重建, 網頁全部重新匯出; 實盤紀錄沿用舊對照、只算新日子 (nightly.yml 手動觸發勾 full)。
 """
 import argparse, os, subprocess, sys, traceback
 from pathlib import Path
@@ -54,6 +55,7 @@ def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--local", action="store_true", help="不從 HF 下載歷史"); ap.add_argument("--no-upload", action="store_true")
     ap.add_argument("--seed", action="store_true", help="首次部署: 上傳本機歷史與全部網頁檔")
     ap.add_argument("--rebuild-live", action="store_true", help="實盤紀錄全部重算 (改了對齊邏輯後用)")
+    ap.add_argument("--full", action="store_true", help="規則改了: 全部重建歷史與網頁 (下載全部 D1 / M1, 約數 GB)")
     a = ap.parse_args()
     tok = os.environ.get("HF_TOKEN")
     if not a.no_upload and not tok: sys.exit("缺環境變數 HF_TOKEN")
@@ -66,13 +68,14 @@ def main():
         files = sorted((ROOT / "data" / "web_export" / "days").glob("*.json")) + [ROOT / "data" / "web_export" / "index.json"]
         E.upload(files, msg="orb seed web"); print(f"完成: {len(files)} 個網頁檔"); return
     HIST.mkdir(parents=True, exist_ok=True)
+    if a.full: return full_rebuild(tok, a.no_upload)
     if not a.local:
         for k in ["days", "trades", "watch"]:
             p = hf_hub_download(HF_REPO, f"{HF_PREFIX}/history/{k}.parquet", repo_type="dataset", force_download=True, token=tok)
             (HIST / f"{k}.parquet").write_bytes(Path(p).read_bytes())
     before = pd.read_parquet(HIST / "days.parquet").date.max()
     print(f"歷史最後一天: {before.date()}")
-    run([sys.executable, "-W", "ignore", str(S / "orb_live.py"), "refresh", "--months", "6", "--m1-months", "2"])
+    run([sys.executable, "-W", "ignore", str(S / "orb_live.py"), "refresh", "--months", "16", "--m1-months", "2"])
     run([sys.executable, "-W", "ignore", str(S / "build_history.py")])
     after = pd.read_parquet(HIST / "days.parquet").date.max()
     import export_live as XL
@@ -97,6 +100,28 @@ def main():
     ops += XL.commit_ops(live)
     HfApi(token=tok).create_commit(repo_id=HF_REPO, repo_type="dataset", operations=ops, commit_message=f"orb nightly {after.date()}")
     print(f"已上傳: history 3 檔 + {len(new_days)} 天 + index.json + 實盤紀錄 {len(live)} 檔")
+
+
+def full_rebuild(tok, no_upload):
+    from huggingface_hub import HfApi, CommitOperationAdd
+    now = pd.Timestamp.now(tz="Asia/Taipei")
+    d1_months = (now.year - 2018) * 12 + now.month            # HF db/d1 從 2018-01, db/m1 從 2020-01
+    m1_months = (now.year - 2020) * 12 + now.month
+    run([sys.executable, "-W", "ignore", str(S / "orb_live.py"), "refresh", "--months", str(d1_months), "--m1-months", str(m1_months)])
+    run([sys.executable, "-W", "ignore", str(S / "build_history.py"), "--full"])
+    run([sys.executable, "-W", "ignore", str(S / "export_web.py"), "--all"])
+    import export_live as XL, export_web as E
+    fixed = check_closes(tok, not no_upload)
+    # 實盤紀錄不重算: 過去的實盤是舊規則跑的, 沿用當時「舊規則實盤 vs 舊規則回測」的對照; 之後的新日子才用新規則回測對照
+    live = live_record(tok, False, False, force=fixed)
+    if no_upload: return
+    out = ROOT / "data" / "web_export"
+    days = sorted((out / "days").glob("*.json"))
+    E.upload(days, msg="orb full rebuild web days")                          # 分批 commit (每批 300 檔)
+    ops = [CommitOperationAdd(path_in_repo=f"{HF_PREFIX}/history/{k}.parquet", path_or_fileobj=str(HIST / f"{k}.parquet")) for k in ["days", "trades", "watch"]]
+    ops += [CommitOperationAdd(path_in_repo=f"{HF_PREFIX}/web/index.json", path_or_fileobj=str(out / "index.json"))] + XL.commit_ops(live)
+    HfApi(token=tok).create_commit(repo_id=HF_REPO, repo_type="dataset", operations=ops, commit_message=f"orb full rebuild {now.date()}")
+    print(f"全部重建完成: history 3 檔 + {len(days)} 天 + index.json + 實盤紀錄 {len(live)} 檔")
 
 
 if __name__ == "__main__":
