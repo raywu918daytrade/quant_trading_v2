@@ -754,14 +754,30 @@ class Quotes:
         if now_tw() < t0: time.sleep((t0 - now_tw()).total_seconds())
         s5 = s5.copy(); ds = now_tw().strftime("%Y-%m-%d"); diff = []; n = 0; late = []; t_start = time.time()
         last_bar = pd.Timestamp(f"{ds} 09:05:00")
+        def one(sid):
+            for tries in range(4):                        # 09:05 那根還沒入庫就等一下再抓 (無量的分鐘也會有一根 K)
+                kb = self.api.kbars(self.api.Contracts.Stocks[sid], start=ds, end=ds)
+                k = pd.DataFrame({**kb}); k["ts"] = pd.to_datetime(k.ts)
+                if len(k) and k.ts.max() >= last_bar: return k, False
+                time.sleep(1.5)
+            return k, True
+        # 2026-11-18: 並行查 (11-13 逐檔 77 檔花約 10 秒, 09:05 跌破的單都要等它); 並行失敗的再逐檔重試一次
+        from concurrent.futures import ThreadPoolExecutor
+        got, fail = {}, []
+        ex = ThreadPoolExecutor(RANGE5_WORKERS); t_end = time.time() + 20      # 並行卡住 (永豐 API 不保證可並行) 最多等 20 秒, 剩下的改逐檔
+        futs = {sid: ex.submit(one, sid) for sid in s5.stock_id}
+        for sid, f in futs.items():
+            try: got[sid] = f.result(timeout=max(0.1, t_end - time.time()))
+            except Exception: fail.append(sid)
+        ex.shutdown(wait=False, cancel_futures=True)
+        for sid in fail:
+            try: got[sid] = one(sid)
+            except Exception as e: print(f"⚠ {sid} 1 分 K 失敗 ({e}), 區間用快照")
         for sid in s5.stock_id:
+            if sid not in got: continue
             try:
-                for tries in range(4):                    # 09:05 那根還沒入庫就等一下再抓 (無量的分鐘也會有一根 K)
-                    kb = self.api.kbars(self.api.Contracts.Stocks[sid], start=ds, end=ds)
-                    k = pd.DataFrame({**kb}); k["ts"] = pd.to_datetime(k.ts)
-                    if len(k) and k.ts.max() >= last_bar: break
-                    time.sleep(1.5)
-                else: late.append(sid)
+                k, is_late = got[sid]
+                if is_late: late.append(sid)
                 k = k[(k.ts > f"{ds} 09:00:00") & (k.ts <= last_bar)]
                 kv = k[k.Volume > 0]
                 if not len(kv): continue
@@ -770,7 +786,7 @@ class Quotes:
                 s5.loc[m, "rh"] = h; s5.loc[m, "rl"] = l
                 if "o5_v" in s5: s5.loc[m, "o5_v"] = float(k.Volume.sum())    # 開盤 5 分量 (張) 也用同一批 K, 兩邊一致
             except Exception as e: print(f"⚠ {sid} 1 分 K 失敗 ({e}), 區間用快照")
-        print(f"{now_tw():%H:%M:%S} 區間用永豐 1 分 K (09:00~09:05) {n}/{len(s5)} 檔, 花 {time.time() - t_start:.1f} 秒"
+        print(f"{now_tw():%H:%M:%S} 區間用永豐 1 分 K (09:00~09:05) {n}/{len(s5)} 檔, 花 {time.time() - t_start:.1f} 秒 (並行 {RANGE5_WORKERS}, 重試 {len(fail)} 檔)"
               + (f"; 與快照不同: {', '.join(diff)}" if diff else ""))
         if late: print(f"⚠ {' '.join(late)} 等不到 09:05 那根 K, 區間只用 09:04 以前")
         return s5
@@ -794,6 +810,8 @@ class Quotes:
         return got
 
 
+RANGE5_WORKERS = 8                                       # 09:05 並行查 1 分 K 的執行緒數
+
 class TickFeed:
     """永豐逐筆 tick 驅動訊號 (2026-11-12 起)。MIS 快照約每 2 分鐘才更新、成交價常是 "-",
     訊號比永豐模擬單晚 1~2 分鐘、價格也是舊的; 改成跟模擬單同一個資料來源。
@@ -804,6 +822,7 @@ class TickFeed:
         self.book, self.mem, self.lock = book, mem, lock
         self.api = None; self.ready = False; self.last_recv = 0.0; self.n = 0
         self.po = None                                   # --paper: paper_orb.PaperOrb, 同一本 Book 的事件直接轉成模擬委託
+        self.subscribed = set(); self.buf = []; self.t_open = None   # 09:02 先訂閱; 09:05 之後、名單出來前的 tick 先暫存, start() 時依序補處理
 
     def login(self):
         """09:02 先登入 (09:05 定區間要用永豐快照); 失敗回 False, 之後全用 MIS。"""
@@ -815,19 +834,34 @@ class TickFeed:
         except (Exception, SystemExit) as e:
             print(f"⚠ 永豐登入失敗 ({e}), 訊號用 MIS"); self.stop(); return False
 
-    def start(self, sids):
+    def subscribe(self, sids):
+        """訂閱 tick (還不觸發訊號)。2026-11-18 起 09:02 候選一出來就訂閱全部候選: 逐檔訂閱 69 檔要約 8 秒,
+        舊做法等 09:05 名單出來才訂閱, 11-13 第一筆訊號 09:05:19 才出來。訂閱後到 start() 之前, 09:05:00 以後的 tick 先暫存。"""
         try:
             import shioaji as sj
             if not self.login(): return False
             self.api.set_on_tick_stk_v1_callback(self.on_tick)
-            for sid in sids:
-                try: self.api.subscribe(self.api.Contracts.Stocks[sid], quote_type=sj.QuoteType.Tick)
+            if self.t_open is None: self.t_open = now_tw().replace(hour=9, minute=P["W"], second=0, microsecond=0)
+            new = [s for s in sids if s not in self.subscribed]; t0 = time.time()
+            for sid in new:
+                try: self.api.subscribe(self.api.Contracts.Stocks[sid], quote_type=sj.QuoteType.Tick); self.subscribed.add(sid)
                 except Exception as e: print(f"訂閱 {sid} tick 失敗: {e}")
-            self.ready = True; self.last_recv = time.time()
-            print(f"{now_tw():%H:%M:%S} 已訂閱永豐 tick {len(sids)} 檔, 訊號改由逐筆成交觸發 (MIS 備援)")
+            if new: print(f"{now_tw():%H:%M:%S} 已訂閱永豐 tick {len(new)} 檔 (花 {time.time() - t0:.1f} 秒)")
             return True
         except (Exception, SystemExit) as e:
             print(f"⚠ 永豐登入 / 訂閱失敗 ({e}), 訊號用 MIS 輪詢"); self.stop(); return False
+
+    def start(self, sids):
+        """09:05 名單 / Book / mem 都設好後呼叫: 補訂閱 (09:02 沒訂到的), 依序補處理暫存的 tick, 之後每筆 tick 直接觸發。"""
+        if not self.subscribe(sids): return False
+        with self.lock:
+            buf, self.buf = self.buf or [], None
+            self.ready = True; self.last_recv = time.time()
+            n = 0
+            for sid, px, dt, recv, cumv in buf:
+                if sid in self.book.s: self._apply(sid, px, dt, recv, cumv); n += 1
+        print(f"{now_tw():%H:%M:%S} 永豐 tick 開始觸發訊號 ({len(sids)} 檔; 補處理 09:05 後暫存的 tick {n} 筆) (MIS 備援)")
+        return True
 
     def alive(self): return self.ready and time.time() - self.last_recv < self.STALE
 
@@ -841,18 +875,27 @@ class TickFeed:
             recv = now_tw()
             dt = (dt.replace(tzinfo=TZ) if dt.tzinfo is None else dt.astimezone(TZ)) if isinstance(dt, datetime) else recv
             cumv = float(getattr(tick, "total_volume", np.nan) or np.nan)
+            if not (px > 0): return
+            if self.ready and sid not in self.book.s: return    # 09:02 訂閱的候選裡沒進名單的: 不拿鎖, 不擋到名單內的 tick
             with self.lock:
                 self.last_recv = time.time(); self.n += 1
-                if not self.ready or sid not in self.book.s or not (px > 0): return
-                t = tmin(dt); m = self.mem[sid]; po = self.po
-                m["z"] = px; m["h"] = max(m["h"], px); m["l"] = min(m["l"], px)
-                if po is not None: po.last[sid] = px; po.last_t[sid] = dt; po.n_ticks[sid] += 1
-                if self.book.s[sid]["state"] in ("WAIT", "SHORT") and not (po is not None and po.closing):   # 模擬單 13:25 掛出收盤回補後不再觸發停損
-                    if po is not None: po._cur = (px, dt, recv)        # 這筆 tick 的 價 / 交易所時間 / 收到時間, 送單紀錄用
-                    self.book.step(t, sid, px, px, px, px)
-                if getattr(self.book, "bars", None) is not None: self.book.bars.add(sid, t, px, cumv)
+                if not self.ready:
+                    if self.buf is not None and self.t_open is not None and dt >= self.t_open and len(self.buf) < 200_000:
+                        self.buf.append((sid, px, dt, recv, cumv))
+                    return
+                if sid in self.book.s: self._apply(sid, px, dt, recv, cumv)
         except Exception as e:
             print("tick callback error:", e)
+
+    def _apply(self, sid, px, dt, recv, cumv):
+        """一筆 tick 進 Book (呼叫端已拿 self.lock)。"""
+        t = tmin(dt); m = self.mem[sid]; po = self.po
+        m["z"] = px; m["h"] = max(m["h"], px); m["l"] = min(m["l"], px)
+        if po is not None: po.last[sid] = px; po.last_t[sid] = dt; po.n_ticks[sid] += 1
+        if self.book.s[sid]["state"] in ("WAIT", "SHORT") and not (po is not None and po.closing):   # 模擬單 13:25 掛出收盤回補後不再觸發停損
+            if po is not None: po._cur = (px, dt, recv)        # 這筆 tick 的 價 / 交易所時間 / 收到時間, 送單紀錄用
+            self.book.step(t, sid, px, px, px, px)
+        if getattr(self.book, "bars", None) is not None: self.book.bars.add(sid, t, px, cumv)
 
     def stop(self):
         self.ready = False
@@ -922,6 +965,7 @@ def _run(a, line):
             pub.push(live_state(ds, "不交易", info, cand=cand, note="；".join(info["reasons"])), force=True); pub.upload_day(ds)
             _paper_no_trade(PO, ppub, ds, info, "；".join(info["reasons"]))
             feed.stop(); return
+    if feed.api is not None and len(cand): feed.subscribe(cand.stock_id.tolist())   # 09:02 就訂閱全部候選, 09:05 名單一出來 tick 已經在流
     pub.push(live_state(ds, "等待 09:05", info, cand=cand), force=True)
     if ppub: ppub.live(dict(date=ds, phase="等待 09:05", n_cand=len(cand)), force=True)
     # ---- 09:05 區間 ----
