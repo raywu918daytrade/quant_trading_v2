@@ -754,25 +754,32 @@ class Quotes:
         if now_tw() < t0: time.sleep((t0 - now_tw()).total_seconds())
         s5 = s5.copy(); ds = now_tw().strftime("%Y-%m-%d"); diff = []; n = 0; late = []; t_start = time.time()
         last_bar = pd.Timestamp(f"{ds} 09:05:00")
-        def one(sid):
-            for tries in range(4):                        # 09:05 那根還沒入庫就等一下再抓 (無量的分鐘也會有一根 K)
-                kb = self.api.kbars(self.api.Contracts.Stocks[sid], start=ds, end=ds)
-                k = pd.DataFrame({**kb}); k["ts"] = pd.to_datetime(k.ts)
-                if len(k) and k.ts.max() >= last_bar: return k, False
-                time.sleep(1.5)
-            return k, True
-        # 2026-11-18: 並行查 (11-13 逐檔 77 檔花約 10 秒, 09:05 跌破的單都要等它); 並行失敗的再逐檔重試一次
-        from concurrent.futures import ThreadPoolExecutor
-        got, fail = {}, []
-        ex = ThreadPoolExecutor(RANGE5_WORKERS); t_end = time.time() + 20      # 並行卡住 (永豐 API 不保證可並行) 最多等 20 秒, 剩下的改逐檔
-        futs = {sid: ex.submit(one, sid) for sid in s5.stock_id}
-        for sid, f in futs.items():
-            try: got[sid] = f.result(timeout=max(0.1, t_end - time.time()))
-            except Exception: fail.append(sid)
-        ex.shutdown(wait=False, cancel_futures=True)
-        for sid in fail:
-            try: got[sid] = one(sid)
-            except Exception as e: print(f"⚠ {sid} 1 分 K 失敗 ({e}), 區間用快照")
+        def get(sid):
+            kb = self.api.kbars(self.api.Contracts.Stocks[sid], start=ds, end=ds)
+            k = pd.DataFrame({**kb}); k["ts"] = pd.to_datetime(k.ts)
+            return k, not (len(k) and k.ts.max() >= last_bar)
+        # 2026-11-18 改回逐檔 + 整體期限: 11-18 並行版 (8 執行緒, 卡住 20 秒後逐檔重試, 每檔最多 4 次 × 1.5 秒) 名單 09:07:46 才出來,
+        # 09:05:01~26 的跌破全部晚 2.7 分鐘送單, 模擬單賣在 2% 以下 (台玻 69.4 → 67.9)。11-13 逐檔 77 檔只花約 10 秒。
+        # 先等第一檔的 09:05 那根 K 入庫 (每檔都等是 11-18 慢的原因之一), 其他檔各查一次; 還缺 09:05 那根的最後再補查一次。
+        # 過了 RANGE5_DEADLINE 秒還沒查到的檔, 區間維持快照值 (不讓整份名單等它)。
+        got = {}; t_end = t_start + RANGE5_DEADLINE; sids = list(s5.stock_id)
+        def work():                                       # 一條背景執行緒逐檔查 (不並行); 主執行緒最多等到 t_end, 單一檔卡住也不會拖住名單
+            for i, sid in enumerate(sids):
+                if time.time() >= t_end: return
+                try:
+                    k, is_late = get(sid)
+                    while i == 0 and is_late and time.time() < min(t_end, t_start + 6):
+                        time.sleep(0.5); k, is_late = get(sid)
+                    got[sid] = (k, is_late)
+                except Exception as e: print(f"⚠ {sid} 1 分 K 失敗 ({e}), 區間用快照")
+            for sid in [s for s, (_, lt) in list(got.items()) if lt]:
+                if time.time() >= t_end: return
+                try: got[sid] = get(sid)
+                except Exception: pass
+        th = threading.Thread(target=work, name="range5", daemon=True); th.start(); th.join(max(0.0, t_end - time.time()))
+        got = dict(got)                                   # 期限到了就用已查到的; 背景執行緒之後寫入的不再採用
+        skipped = [s for s in sids if s not in got]
+        if skipped: print(f"⚠ 1 分 K 超過 {RANGE5_DEADLINE} 秒期限, {len(skipped)} 檔區間用快照: {' '.join(skipped)}")
         for sid in s5.stock_id:
             if sid not in got: continue
             try:
@@ -786,7 +793,7 @@ class Quotes:
                 s5.loc[m, "rh"] = h; s5.loc[m, "rl"] = l
                 if "o5_v" in s5: s5.loc[m, "o5_v"] = float(k.Volume.sum())    # 開盤 5 分量 (張) 也用同一批 K, 兩邊一致
             except Exception as e: print(f"⚠ {sid} 1 分 K 失敗 ({e}), 區間用快照")
-        print(f"{now_tw():%H:%M:%S} 區間用永豐 1 分 K (09:00~09:05) {n}/{len(s5)} 檔, 花 {time.time() - t_start:.1f} 秒 (並行 {RANGE5_WORKERS}, 重試 {len(fail)} 檔)"
+        print(f"{now_tw():%H:%M:%S} 區間用永豐 1 分 K (09:00~09:05) {n}/{len(s5)} 檔, 花 {time.time() - t_start:.1f} 秒"
               + (f"; 與快照不同: {', '.join(diff)}" if diff else ""))
         if late: print(f"⚠ {' '.join(late)} 等不到 09:05 那根 K, 區間只用 09:04 以前")
         return s5
@@ -810,7 +817,7 @@ class Quotes:
         return got
 
 
-RANGE5_WORKERS = 8                                       # 09:05 並行查 1 分 K 的執行緒數
+RANGE5_DEADLINE = 15                                     # 09:05 查 1 分 K 最多花幾秒 (超過的檔區間用快照), 名單不能再拖
 
 class TickFeed:
     """永豐逐筆 tick 驅動訊號 (2026-11-12 起)。MIS 快照約每 2 分鐘才更新、成交價常是 "-",
@@ -857,10 +864,13 @@ class TickFeed:
         with self.lock:
             buf, self.buf = self.buf or [], None
             self.ready = True; self.last_recv = time.time()
-            n = 0
+            n = 0; now_px = {}
+            for sid, px, *_ in buf: now_px[sid] = px          # 每檔暫存的最後一筆 = 現在的價
             for sid, px, dt, recv, cumv in buf:
-                if sid in self.book.s: self._apply(sid, px, dt, recv, cumv); n += 1
-        print(f"{now_tw():%H:%M:%S} 永豐 tick 開始觸發訊號 ({len(sids)} 檔; 補處理 09:05 後暫存的 tick {n} 筆) (MIS 備援)")
+                if sid in self.book.s: self._apply(sid, px, dt, recv, cumv, fill_px=now_px[sid]); n += 1
+            late = [f"{e['stock_id']} {e['event']}" for e in self.book.events if e.get("replay")]
+        print(f"{now_tw():%H:%M:%S} 永豐 tick 開始觸發訊號 ({len(sids)} 檔; 補處理 09:05 後暫存的 tick {n} 筆) (MIS 備援)"
+              + (f"; 名單出來前就跌破 / 停損 (價格記現價, 與模擬單同時送出): {', '.join(late)}" if late else ""))
         return True
 
     def alive(self): return self.ready and time.time() - self.last_recv < self.STALE
@@ -887,14 +897,19 @@ class TickFeed:
         except Exception as e:
             print("tick callback error:", e)
 
-    def _apply(self, sid, px, dt, recv, cumv):
-        """一筆 tick 進 Book (呼叫端已拿 self.lock)。"""
+    def _apply(self, sid, px, dt, recv, cumv, fill_px=None):
+        """一筆 tick 進 Book (呼叫端已拿 self.lock)。
+        fill_px: start() 補處理暫存 tick 時 = 該檔現在的價。觸發仍照當時那筆 tick 判斷, 但進場 / 停損價記現價:
+        訊號是名單出來 (現在) 才知道的, 模擬單也是現在才市價送出; 記當時的 tick 價會讓訊號比做得到的好 (11-18 台玻 69.4 vs 模擬 67.9)。"""
         t = tmin(dt); m = self.mem[sid]; po = self.po
         m["z"] = px; m["h"] = max(m["h"], px); m["l"] = min(m["l"], px)
         if po is not None: po.last[sid] = px; po.last_t[sid] = dt; po.n_ticks[sid] += 1
         if self.book.s[sid]["state"] in ("WAIT", "SHORT") and not (po is not None and po.closing):   # 模擬單 13:25 掛出收盤回補後不再觸發停損
             if po is not None: po._cur = (px, dt, recv)        # 這筆 tick 的 價 / 交易所時間 / 收到時間, 送單紀錄用
-            self.book.step(t, sid, px, px, px, px)
+            n_ev = len(self.book.events)
+            self.book.step(t, sid, px, px, px, px if fill_px is None else fill_px)
+            if fill_px is not None:
+                for e in self.book.events[n_ev:]: e["replay"] = True; e["tick_px"] = px; e["note"] += f" (觸發 {dt:%H:%M:%S} @ {px:g}, 名單出來時現價 {fill_px:g})"
         if getattr(self.book, "bars", None) is not None: self.book.bars.add(sid, t, px, cumv)
 
     def stop(self):
