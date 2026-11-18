@@ -56,15 +56,24 @@ I["date"] = pd.to_datetime(I.date); I["stock_id"] = I.stock_id.astype(str).str.s
 I = I[I.stock_id.str.fullmatch(r"\d{4}") & ~I.stock_id.str.startswith("00")].drop_duplicates(["date", "stock_id"], keep="last")
 P(f"<!-- 三大法人 {len(I):,} 列, {I.date.min().date()} ~ {I.date.max().date()}, {I.stock_id.nunique()} 檔, 缺值 {I[['fi','it','dl','tot']].isna().mean().round(3).to_dict()} -->")
 days_i = sorted(I.date.unique())
+def holes(df, Wd):
+    """上市 / 上櫃各自哪幾天沒抓到 → 該市場的股票那天設 NaN (不要當成 0)。"""
+    mk_of = df.sort_values("date").groupby("stock_id").mkt.last()
+    for m, g in df.groupby("mkt"):
+        miss = ~Wd.index.isin(g.date.unique())
+        cols = [c for c in Wd.columns if mk_of.get(c) == m]
+        if miss.any(): Wd.loc[miss, cols] = np.nan
+        print(f"  {m}: 缺 {int(miss.sum())} 個交易日 (最後 {g.date.max().date()})", flush=True)
+    return Wd
 feat = {}           # name -> wide (date × stock), 值 = 該日收盤後已知
 for c in ["fi", "it", "dl", "tot"]:
-    W = wide(I, c).reindex(days_i).fillna(0.0)          # 沒列出 = 當天法人沒買賣
+    W = holes(I, wide(I, c).reindex(days_i).fillna(0.0))   # 沒列出 = 當天法人沒買賣; 整個市場缺的日子 = NaN
     feat[f"{c}1"] = W; feat[f"{c}5"] = W.rolling(5, min_periods=5).sum()
-    pos = (W > 0).astype(int); neg = (W < 0).astype(int)
+    pos = (W > 0).astype(int).where(W.notna()); neg = (W < 0).astype(int).where(W.notna())
     # 連續買超 (+) / 賣超 (−) 天數
     def streak(b):
         grp = (b == 0).cumsum(); return b.groupby(grp).cumsum()
-    feat[f"{c}_st"] = pos.apply(streak) - neg.apply(streak)
+    feat[f"{c}_st"] = (pos.fillna(0).apply(streak) - neg.fillna(0).apply(streak)).where(W.notna())
 
 # ---------------- 融資融券 (個股) ----------------
 M = pd.concat([pd.read_parquet(p).assign(mkt=p.name.split("_")[1]) for p in sorted(CH.glob("margin_*.parquet"))], ignore_index=True)
@@ -89,15 +98,16 @@ for nm in ["gb", "bk"]:          # gb = 八大行庫合計買賣超 (股); bk = 
 # ---------------- 當沖 (隔日沖替代指標) ----------------
 fs = sorted(FL.glob("dt_*.parquet"))
 if fs:
-    T = pd.concat([pd.read_parquet(p) for p in fs], ignore_index=True)
+    T = pd.concat([pd.read_parquet(p).assign(mkt=p.name.split("_")[1][2:]) for p in fs], ignore_index=True)
     T["date"] = pd.to_datetime(T.date); T["stock_id"] = T.stock_id.astype(str).str.strip()
     T = T[T.stock_id.str.fullmatch(r"\d{4}")].drop_duplicates(["date", "stock_id"], keep="last")
     P(f"<!-- 當沖 {len(T):,} 列, {T.date.min().date()} ~ {T.date.max().date()} -->")
-    Wt = wide(T, "dtv").reindex(sorted(T.date.unique())).fillna(0.0)
+    Wt = holes(T, wide(T, "dtv").reindex(sorted(T.date.unique())).fillna(0.0))
     VO = wide(D, "volume").reindex(index=Wt.index, columns=Wt.columns)
     feat["dtr1"] = (Wt / VO * 100).where(VO > 0)                      # 前一日當沖率 % (當沖股數 / 成交股數)
     feat["dtr5"] = (Wt.rolling(5).sum() / VO.rolling(5).sum() * 100).where(VO.rolling(5).sum() > 0)
     MDT = (Wt * CL.reindex(index=Wt.index, columns=Wt.columns)).sum(axis=1) / TV.reindex(Wt.index) * 100   # 大盤當沖占成交值 %
+    MDT[Wt.isna().any(axis=1)] = np.nan                                  # 有市場缺資料的日子不算大盤
 
 def attach(X, name, W, norm=True):
     """X 每列 (date, stock_id) 取 W 在 date 之前最後一個交易日的值; norm: ÷ 20 日均量 (股) × 100。"""
@@ -115,6 +125,7 @@ mk = pd.DataFrame(index=pd.DatetimeIndex(days_i))
 for c in ["fi", "it", "dl", "tot"]:
     W = feat[f"{c}1"]; cl = CL.reindex(index=W.index, columns=W.columns)
     amt = (W * cl).sum(axis=1)                                                   # 元
+    amt[W.isna().any(axis=1)] = np.nan                                           # 有市場缺資料的日子不算大盤
     tv20 = TV.reindex(W.index).rolling(20, min_periods=10).mean()
     mk[f"M_{c}1"] = amt / tv20 * 100; mk[f"M_{c}5"] = amt.rolling(5).sum() / tv20 * 100   # 占 20 日均成交值 %
 MBt = M.groupby(["date", "mkt"]).mb.sum().unstack().dropna().sum(axis=1)
