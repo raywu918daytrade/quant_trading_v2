@@ -267,7 +267,8 @@ STATE = ((TB * 7 + PB) * 4 + GB) * 2 + VB
 NS = 7 * 7 * 4 * 2
 EXITV = ret(CF * (1 + SLIP))                                              # 該分鐘收盤平倉的報酬
 o_stop = np.where(np.isnan(O), RH, O)
-STOPV = (-(np.minimum(np.maximum(RH, o_stop) * (1 + STOP_SLIP), PC * (1 + FORCE) * (1 + FORCE_SLIP)) / E - 1) - COST) * 100
+_sp = np.maximum(RH, o_stop) * (1 + STOP_SLIP)
+STOPV = (-(np.where(_sp >= PC * (1 + FORCE), PC * (1 + FORCE) * (1 + FORCE_SLIP), _sp) / E - 1) - COST) * 100   # 同 stop_px_of
 CLOSEV = ret(CF[:, 270])
 T_LAST = 264                                                               # 13:24 收盤前最後一次決策
 def values(pol, S=None):
@@ -353,6 +354,30 @@ for nm, r in [("現行", base_r)] + [(k, v[0]) for k, v in WF.items()]:
     for y in TEST_YEARS:
         s = stats(r, YEAR == y); cells.append(f"{s['ann']:.0f} / {s['mdd']:.0f}")
     P(f"| {nm} | " + " | ".join(cells) + " |")
+
+P(""); P("## 3b. 固定參數候選 逐年 (全期 2020~, 年均 萬 / 最大回撤 萬) — 看改善是不是只集中在某一年")
+CAND = [("現行", base_r), ("移動停利 賺2%後反彈3%", RES[("移動停利", "賺 2% 後, 從最低反彈 3% 出")]),
+        ("保本 賺2%後停損移到進場價", RES[("保本停損", "賺 2% 後停損移到 進場價−0%")]),
+        ("保本 賺3%後停損移到進場價", RES[("保本停損", "賺 3% 後停損移到 進場價−0%")]),
+        ("13:00 後反彈 2% 出", RES[("盤後段移動停利", "13:00 後從最低反彈 2% 出")])]
+YS = sorted(set(YEAR))
+P(""); P("| 出場法 | " + " | ".join(str(y) for y in YS) + " | 全期 |"); P("|---|" + "---|" * (len(YS) + 1))
+for nm, r in CAND:
+    P(f"| {nm} | " + " | ".join(f"{stats(r, YEAR == y)['ann']:.0f} / {stats(r, YEAR == y)['mdd']:.0f}" for y in YS) + f" | {stats(r)['ann']:.0f} / {stats(r)['mdd']:.0f} |")
+P(""); P("回撤最深的 5 段 (現行): 起訖日、現行 vs 候選 的回撤 (萬)")
+dl0 = daily(base_r); eq0 = dl0.cumsum(); dd0 = eq0 - eq0.cummax()
+peaks = []
+x = dd0.copy()
+for _ in range(5):
+    tmin = x.idxmin()
+    if x[tmin] >= 0: break
+    st = eq0[:tmin].idxmax(); en = tmin
+    row = f"- {st.date()} ~ {en.date()}: 現行 {(eq0[en] - eq0[st]) * 3:.0f}"
+    for nm, r in CAND[1:]:
+        e = daily(r).cumsum(); row += f"、{nm} {(e[en] - e[st]) * 3:.0f}"
+    P(row); x[st:en + pd.Timedelta(days=1)] = 0
+    nxt = eq0[en:]; rec = nxt[nxt >= eq0[st]]
+    if len(rec): x[en:rec.index[0]] = 0
 
 P(""); P("## 4. 對照")
 P(""); [P(h) for h in HD]
