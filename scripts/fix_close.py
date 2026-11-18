@@ -88,10 +88,18 @@ def fix_paper(repo, C, log):
         tr = pd.read_csv(io.BytesIO(repo.read(f)), dtype={"stock_id": str})
         if not len(tr) or "exit_leg" not in tr: continue
         if "broker_buy_px" not in tr: tr["broker_buy_px"] = np.nan
-        changed = set()
+        changed = set(); filled_only = set()
         for i, r in tr.iterrows():
             c = C.get((ds, r.stock_id))
-            if r.exit_leg != "close" or c is None or not np.isfinite(r.buy_px): continue
+            if r.exit_leg != "close" or c is None: continue
+            if not np.isfinite(r.buy_px) and np.isfinite(r.sell_px) and r.status == "未回補":   # 收盤回補委託送不出去 (11-18 永豐模擬環境逾時): 收盤腳本來就以收盤價結算, 補上並標註
+                q = r.sell_lots; sim = 1 - c / r.sell_px - COST; ideal = 1 - c / r.rl - COST
+                new_pnl = (r.sell_px - c) * 1000 * q - COST * r.sell_px * 1000 * q
+                log.append(f"模擬 {ds} {r.stock_id} {r['name']}: 收盤回補委託失敗, 以收盤 {c:g} 計, 損益 {new_pnl:+,.0f}")
+                tr.loc[i, ["status", "buy_px", "buy_lots", "close_px", "sim_net_pct", "sim_pnl", "ideal_net_pct", "ideal_pnl"]] = [
+                    "收盤回補 (委託失敗, 以收盤價計)", c, q, c, sim * 100, new_pnl, ideal * 100, ideal * r.rl * 1000 * r.lots]
+                changed.add(r.stock_id); filled_only.add(r.stock_id); continue
+            if not np.isfinite(r.buy_px): continue
             if abs(r.buy_px - c) < TOL and abs(r.close_px - c) < TOL: continue
             q = min(r.sell_lots, r.buy_lots)
             sim = 1 - c / r.sell_px - COST; ideal = 1 - c / r.rl - COST
@@ -105,7 +113,7 @@ def fix_paper(repo, C, log):
         legs = None; sf = f.replace("_trades.csv", "_slippage.csv")
         if sf in repo.files:
             legs = pd.read_csv(io.BytesIO(repo.read(sf)), dtype={"stock_id": str})
-            m = (legs.leg == "close") & legs.stock_id.isin(changed)
+            m = (legs.leg == "close") & legs.stock_id.isin(changed - filled_only)      # 補上的收盤腳沒有成交, 不改滑價紀錄
             if m.any():
                 c = legs.loc[m].stock_id.map(lambda s: C[(ds, s)])
                 if "broker_fill_px" not in legs: legs["broker_fill_px"] = np.nan
@@ -125,7 +133,8 @@ def _paper_summaries(repo, fixed):
     upd = {}
     for ds, (t, g) in fixed.items():
         done = t[t.sell_px.notna() & t.buy_px.notna()]
-        u = dict(sim_avg_net_pct=mean(done.sim_net_pct), ideal_avg_net_pct=mean(t.ideal_net_pct),
+        u = dict(n_unclosed=int((t.status == "未回補").sum()), n_close_failed=int(t.status.astype(str).str.contains("委託失敗").sum()),
+                 n_close=int((done.exit_leg == "close").sum()), sim_avg_net_pct=mean(done.sim_net_pct), ideal_avg_net_pct=mean(t.ideal_net_pct),
                  sim_pnl=round(float(done.sim_pnl.sum())) if len(done) else None, ideal_pnl=round(float(pd.to_numeric(t.ideal_pnl, errors="coerce").sum())))
         if g is not None and len(g): u["close_slip_ticks"] = mean(g[(g.filled.astype(str) == "True") & (g.leg == "close")].slip_ticks)
         upd[ds] = u

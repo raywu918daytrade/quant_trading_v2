@@ -46,7 +46,8 @@ PAPER = ROOT / "paper"
 HF_PAPER = f"{HF_PREFIX}/paper"
 TAG = "orbv2"                 # custom_field (≤6 字): 同一個模擬帳戶也跑 v1 paper_trade, 用它分辨回報
 SIMULATION = True             # 安全常數: 改成 False 程式會拒絕執行
-AUCTION_T = (13, 25, 10)      # 收盤集合競價開始後, 剩餘部位以漲停價限價買回
+AUCTION_T = (13, 25, 2)       # 收盤集合競價 (13:25:00 開始) 一開始就以漲停價限價買回剩餘部位; 11-18 前是 13:25:10
+CLOSE_RETRY_END = (13, 29, 45)  # 收盤回補送不出去 (逾時 / 失敗) 時, 一直重送到這個時間 (13:30:00 撮合)
 END_T = (13, 35, 0)
 LIVE_EVERY = 180              # 盤中至少每 3 分鐘上傳一次 live.json
 EVENT_GAP = 120               # 有事件時最快每 2 分鐘上傳一次 (HF 每個 repo 每小時最多 128 個 commit, live / paper / v1 共用)
@@ -217,6 +218,7 @@ class PaperOrb:
         self.book.log = self._on_book_event
         self.sid_lock = defaultdict(threading.RLock)   # 同一檔的 券賣 / 停損 / 收盤 / 補單 依序執行
         self.pool = None                               # start() 後: 訊號並行送單; replay 不開 (process() 同步處理, 結果可重現)
+        self.buy_acked = defaultdict(int)              # 委託回報 (on_order) 確認收到的買回張數: place_order 逾時但其實有送到時, 不重複補送
 
     def start(self, workers=ORDER_WORKERS):
         """盤中低延遲模式: dispatcher 執行緒一收到 Book 事件就丟進執行緒池送單, 不經過主迴圈。"""
@@ -272,6 +274,9 @@ class PaperOrb:
             else:
                 o = msg.get("order", {}) or {}; op = msg.get("operation", {}) or {}
                 if o.get("custom_field") not in (None, "", TAG): return
+                if o.get("custom_field") == TAG and op.get("op_code") in ("00", None) and op.get("op_type") == "New" and "Buy" in str(o.get("action")):   # 只認自己的單 (同帳戶 v1 的回報也會進來)
+                    sid = str((msg.get("contract") or {}).get("code"))
+                    with self.lock: self.buy_acked[sid] += int(o.get("quantity") or 0)
                 if op.get("op_code") not in ("00", None):
                     sid = str((msg.get("contract") or {}).get("code")); txt = f"op_code={op.get('op_code')} {op.get('op_msg')}"
                     log(f"委託異常 {sid} {o.get('action')} {txt}")
@@ -347,6 +352,11 @@ class PaperOrb:
 
     def _buy(self, sid, q, limit_px):
         L = self.leg[sid]["exit"]
+        acked = self.buy_acked.get(sid, 0) - L.get("ordered", 0)        # 之前逾時但交易所其實收到的買單 (11-18 永豐模擬環境 place_order 一律 30 秒逾時)
+        if acked > 0:
+            L["ordered"] = L.get("ordered", 0) + acked; L["status"] = "Submitted (逾時後回報確認)"; q -= acked
+            log(f"{sid} 先前逾時的買回單已確認送達 {acked} 張")
+            if q <= 0: return
         try:
             t0 = self.clock()
             tr, st = self.broker.buy(sid, q, limit_px=limit_px); L.setdefault("order_time", t0); L.setdefault("ack_time", self.clock()); L["status"] = st
@@ -355,42 +365,63 @@ class PaperOrb:
             log(f"買回 {sid} {q} 張 {f'限價 {limit_px:g} (收盤競價)' if limit_px else '市價'} ({L['leg']}) → {st}")
         except Exception as ex:
             L["status"] = f"委託失敗: {ex}"; log("✗ 買回委託失敗", sid, ex)
-            L.setdefault("ordered", 0); L["fail"] = L.get("fail", 0) + 1      # reconcile 會再補送 (最多 5 次), 不然這檔空單就沒人買回
+            L.setdefault("ordered", 0); L["fail"] = L.get("fail", 0) + 1      # reconcile 會再補送 (盤中最多 5 次; 收盤回補重送到 CLOSE_RETRY_END), 不然這檔空單就沒人買回
 
     def reconcile(self):
-        """券賣成交張數 > 已送出的買回張數 (取消券賣與成交賽跑時會發生) → 補送買回差額."""
+        """券賣成交張數 > 已送出的買回張數 (取消券賣與成交賽跑、或買回委託失敗) → 補送買回差額。
+        有送單執行緒池時丟進池子並行送 (11-18: 三檔各卡 30 秒逾時, 逐檔在主迴圈重送, 每輪只輪到一檔); 同一檔同時只會有一筆補送。"""
+        auc = self.clock() >= self.clock().replace(hour=AUCTION_T[0], minute=AUCTION_T[1], second=AUCTION_T[2], microsecond=0)
+        retry_end = self.clock().replace(hour=CLOSE_RETRY_END[0], minute=CLOSE_RETRY_END[1], second=CLOSE_RETRY_END[2], microsecond=0)
         for sid, legs in list(self.leg.items()):
             L = legs.get("exit")
-            if not L or "ordered" not in L or L.get("fail", 0) >= 5: continue
+            if not L or "ordered" not in L or L.get("inflight"): continue
+            if L.get("leg") == "close" and self.clock() >= retry_end: continue        # 13:30 撮合後再送沒有意義 (11-18 一路送到 13:34)
+            if L.get("fail", 0) >= 5 and L.get("leg") != "close": continue
             _, q, _ = self.filled((sid, "Sell"))
             if q > L["ordered"]:
-                with self.sid_lock[sid]:
-                    _, q, _ = self.filled((sid, "Sell"))
-                    if q <= L["ordered"]: continue
-                    log(f"⚠ {sid} 券賣成交 {q} 張 > 已買回 {L['ordered']} 張, 補買回差額")
-                    self._buy(sid, q - L["ordered"], self.broker.limit_up(sid) if self.clock() >= self.clock().replace(hour=AUCTION_T[0], minute=AUCTION_T[1], second=AUCTION_T[2], microsecond=0) else None)
+                L["inflight"] = True
+                def job(sid=sid, L=L):
+                    try:
+                        with self.sid_lock[sid]:
+                            _, q, _ = self.filled((sid, "Sell"))
+                            if q <= L["ordered"]: return
+                            log(f"⚠ {sid} 券賣成交 {q} 張 > 已買回 {L['ordered']} 張, 補買回差額")
+                            self._buy(sid, q - L["ordered"], self._limit_up(sid) if auc else None)
+                    finally: L["inflight"] = False
+                if self.pool is not None: self.pool.submit(job)
+                else: job()
 
-    def close_all(self, limit=True):
-        """13:25 後: Book 仍在 SHORT 的部位, 以漲停價限價買回 (= 以收盤價成交)."""
+    def _limit_up(self, sid):
+        try: return self.broker.limit_up(sid)
+        except Exception: return self.w[sid]["lu"]
+
+    def close_all(self, limit=True, wait=40):
+        """13:25 後: Book 仍在 SHORT 的部位, 以漲停價限價買回 (= 以收盤價成交)。
+        2026-11-18 起各檔並行送 (那天永豐模擬環境 place_order 每筆卡 30 秒逾時, 逐檔送 13:25:10 → 13:27:22 才知道三檔都失敗);
+        最多等 wait 秒回報結果, 失敗的檔由 reconcile 持續重送到 CLOSE_RETRY_END。"""
         with self.lock:
             self.closing = True; holding = [s for s, p in self.book.s.items() if p["state"] == "SHORT"]
         failed = []
-        for sid in holding:                              # 一檔出錯不可以讓後面的檔沒回補
+        def one(sid):                                    # 一檔出錯不可以讓其他檔沒回補
             try:
                 with self.sid_lock[sid]: self._close_one(sid, limit)
-                if str(self.leg[sid].get("exit", {}).get("status", "")).startswith("委託失敗"): failed.append(sid)
+                return not str(self.leg[sid].get("exit", {}).get("status", "")).startswith("委託失敗")
             except Exception as ex:
-                failed.append(sid); log(f"✗ 收盤回補 {sid} 出錯: {ex}")
+                log(f"✗ 收盤回補 {sid} 出錯: {ex}"); X = self.leg[sid].setdefault("exit", dict(leg="close")); X.setdefault("ordered", 0); X["fail"] = X.get("fail", 0) + 1; return False
+        if self.pool is not None:
+            futs = {sid: self.pool.submit(one, sid) for sid in holding}; t_end = time.time() + wait
+            for sid, f in futs.items():
+                try: ok = f.result(timeout=max(0.1, t_end - time.time()))
+                except Exception: ok = False
+                if not ok: failed.append(sid)
+        else:
+            failed = [sid for sid in holding if not one(sid)]
         return holding, failed
 
     def _close_one(self, sid, limit):
         if "exit" in self.leg[sid] or self.leg[sid].get("entry", {}).get("status") == "skipped": return
         self.leg[sid]["exit"] = dict(leg="close", signal_px=np.nan, trigger_px=np.nan, tick_time=None, recv_time=None)
-        lim = None
-        if limit:
-            try: lim = self.broker.limit_up(sid)
-            except Exception: lim = self.w[sid]["lu"]
-        self.cover(sid, lim)
+        self.cover(sid, self._limit_up(sid) if limit else None)
 
     def expire(self, t):
         with self.lock:
@@ -411,8 +442,11 @@ class PaperOrb:
             sell_px, sell_q, sell_t = self.filled((sid, "Sell")); buy_px, buy_q, buy_t = self.filled((sid, "Buy"))
             close_px = closes.get(sid, np.nan)
             broker_buy_px = buy_px
+            close_unfilled = False
             if X.get("leg") == "close":
                 X["signal_px"] = close_px
+                if sell_px and not buy_px and np.isfinite(close_px):   # 收盤回補委託送不出去 (11-18 永豐模擬環境逾時): 收盤腳本來就以真實收盤價結算, 照算並標註
+                    buy_px, buy_q, close_unfilled = float(close_px), sell_q, True
                 # 收盤集合競價的成交價就是收盤價; 永豐模擬環境的收盤回報價不可靠 (2026-11-04: 順達 283.5 vs 收盤 271.5、合晶 77.4 vs 83.5),
                 # 所以收盤腳以真實收盤價結算, 模擬回報價另存 broker_buy_px 供對照。
                 if buy_px and np.isfinite(close_px): buy_px = float(close_px)
@@ -427,6 +461,7 @@ class PaperOrb:
             elif p["state"] == "FULL": status = "跌破但額滿"
             elif not sell_px: status = "券賣未成交"
             elif not buy_px: status = "未回補"
+            elif close_unfilled: status = "收盤回補 (委託失敗, 以收盤價計)"
             else: status = {"stop": "停損", "close": "收盤回補"}.get(X.get("leg"), X.get("leg", ""))
             trades.append(dict(date=self.ds, stock_id=sid, name=w["name"], pc=w["pc"], gap=round(w["gap"] * 100, 2), rl=w["rl"], rh=w["rh"], lots=w["lots"],
                                status=status, exit_leg=X.get("leg", ""),
@@ -436,7 +471,7 @@ class PaperOrb:
                                sim_net_pct=r_sim * 100, sim_pnl=pnl,
                                book_net_pct=bk.loc[sid, "r_pct"] if len(bk) and sid in bk.index else np.nan,
                                ideal_net_pct=r_ideal * 100, ideal_pnl=r_ideal * w["rl"] * 1000 * w["lots"]))
-            for name, L, act, fpx, fq, ft in [("entry", E, "Sell", sell_px, sell_q, sell_t), ("exit", X, "Buy", buy_px, buy_q, buy_t)]:
+            for name, L, act, fpx, fq, ft in [("entry", E, "Sell", sell_px, sell_q, sell_t), ("exit", X, "Buy", None if close_unfilled else buy_px, 0 if close_unfilled else buy_q, buy_t)]:   # 沒成交的腳不算滑價
                 broker_px = broker_buy_px if name == "exit" else fpx
                 if not L: continue
                 sig, trig = L.get("signal_px"), L.get("trigger_px")
@@ -485,6 +520,7 @@ def summarize(ds, info, trades, legs, n_watch, mode):
                 mkt_gap_pct=None if info.get("mkt_gap") is None else round(info["mkt_gap"] * 100, 2),
                 n_cand=info.get("n_cand", 0), n_watch=n_watch, n_signal=len(t), n_filled=int(t.sell_px.notna().sum()),
                 n_stop=int((done.exit_leg == "stop").sum()), n_close=int((done.exit_leg == "close").sum()), n_unclosed=int((t.status == "未回補").sum()),
+                n_close_failed=int(t.status.astype(str).str.contains("委託失敗").sum()),     # 收盤回補送不出去、以收盤價計 (11-18 起)
                 n_skipped=int(t.status.astype(str).str.startswith("略過").sum()), n_full=int((t.status == "跌破但額滿").sum()),
                 entry_slip_ticks=mean(gf[gf.leg == "entry"].slip_ticks), entry_trigger_ticks=mean(gf[gf.leg == "entry"].trigger_slip_ticks),
                 entry_exec_ticks=mean(gf[gf.leg == "entry"].exec_slip_ticks),

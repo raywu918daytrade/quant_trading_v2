@@ -531,7 +531,7 @@ async function loadLvIndex() {
   lvEq.timeScale().fitContent();
   $("lvdays").innerHTML = `<table class="dl"><thead><tr><th>日期</th><th>訊號 / 模擬 / 回測筆</th><th>訊號損益</th><th>模擬損益</th><th>模擬 − 訊號</th><th title="兩邊都做的股票: 下單時間差 + 滑價">同股差</th><th title="只有一邊做的股票 (先跌破 10 檔排序不同)">選股不同</th><th>回測損益</th><th>訊號每筆</th><th>模擬每筆</th><th>備註</th></tr></thead><tbody>` +
     [...days].reverse().map(({ date, r, p }) => {
-      const note = [...new Set([DAY_NOTES[date], r && r.note, p && !p.trade_ok ? p.reasons : "", p && p.n_skipped ? `模擬不下單 ${p.n_skipped}` : "", p && p.n_unclosed ? `⚠ 未回補 ${p.n_unclosed}` : "", !r ? "沒有訊號紀錄" : "", !p ? "沒有模擬單紀錄" : ""].filter(Boolean))].join("，");
+      const note = [...new Set([DAY_NOTES[date], r && r.note, p && !p.trade_ok ? p.reasons : "", p && p.n_skipped ? `模擬不下單 ${p.n_skipped}` : "", p && p.n_unclosed ? `⚠ 未回補 ${p.n_unclosed}` : "", p && p.n_close_failed ? `⚠ 模擬收盤回補委託失敗 ${p.n_close_failed} 檔 (以收盤價計)` : "", !r ? "沒有訊號紀錄" : "", !p ? "沒有模擬單紀錄" : ""].filter(Boolean))].join("，");
       const x = lvSplit(r, p), diff = x ? x.all : null;
       return `<tr data-d="${date}" class="${p && p.n_unclosed ? "warn" : p && !p.trade_ok ? "dim" : ""}"><td>${date.slice(5)} (${wd(date)})</td>
         <td>${r ? r.n_live : "–"} / ${p ? p.n_filled ?? 0 : "–"} / ${r && r.bt_ready ? r.n_bt : "–"}</td><td>${yuan(r && r.live_pnl)}</td><td>${yuan(p && p.sim_pnl)}</td><td>${yuan(diff)}</td>

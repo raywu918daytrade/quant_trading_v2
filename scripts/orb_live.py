@@ -1029,7 +1029,7 @@ def _run(a, line):
     pt = dict(sync=time.time(), push=time.time(), err=0)
     t_auc = now_tw().replace(hour=PO.AUCTION_T[0], minute=PO.AUCTION_T[1], second=PO.AUCTION_T[2], microsecond=0) if PO else None
     def paper_step():
-        """模擬單的例行工作 (主迴圈每輪呼叫, 不持鎖): 補買回差額、補漏掉的成交回報、13:25:10 掛收盤回補、上傳 paper/live.json。
+        """模擬單的例行工作 (主迴圈每輪呼叫, 不持鎖): 補買回差額、補漏掉的成交回報、13:25:02 掛收盤回補、上傳 paper/live.json。
         出錯只印出 / 推一次 LINE, 不可以讓訊號端跟著中斷。"""
         def guard(what, f, always_line=False):
             try: return f()
@@ -1037,17 +1037,22 @@ def _run(a, line):
                 pt["err"] += 1; print(f"⚠ 模擬單{what}出錯 ({pt['err']}): {type(e).__name__}: {e}")
                 if pt["err"] == 1 or always_line: line.push_async(card_paper_err(f"模擬單{what}出錯", e))
         if not po.closing and now_tw() >= t_auc:          # 收盤回補最優先, 不被下面任何一步的錯誤擋住
-            def auction():
-                try: po.sync_deals()
-                except Exception as e: print(f"⚠ 收盤回補前 sync_deals 失敗: {e}")
-                held, failed = po.close_all(limit=True)
-                print(f"{now_tw():%H:%M:%S} 模擬單 13:25 收盤競價回補 {len(held)} 檔 (漲停價限價): {held}")
-                if failed: raise RuntimeError("收盤回補委託失敗: " + ", ".join(failed))
+            def auction():                                # 不先 sync_deals: 11-18 永豐模擬環境 update_status 每次卡 30 秒逾時, 回補因此晚送; 券賣成交張數靠成交回報, 少算的由 reconcile 補
+                held, failed = po.close_all(limit=True)   # 各檔並行送, 最多等 40 秒
+                print(f"{now_tw():%H:%M:%S} 模擬單收盤競價回補 {len(held)} 檔 (漲停價限價): {held}" + (f"; 送出失敗 {failed}, 重送到 {PO.CLOSE_RETRY_END[0]}:{PO.CLOSE_RETRY_END[1]:02d}:{PO.CLOSE_RETRY_END[2]:02d}" if failed else ""))
+                if failed:
+                    why = "; ".join(sorted({str(po.leg[s].get("exit", {}).get("status", ""))[:80] for s in failed}))
+                    raise RuntimeError(f"收盤回補委託失敗: {', '.join(failed)} ({why}); 自動重送到 {PO.CLOSE_RETRY_END[0]}:{PO.CLOSE_RETRY_END[1]:02d}:{PO.CLOSE_RETRY_END[2]:02d}, 仍失敗則結算以收盤價計")
                 return held
             held = guard("收盤回補", auction, always_line=True) or []
             guard("上傳", lambda: ppub.live(paper_state("等待收盤", f"收盤競價回補 {len(held)} 檔"), force=True)); po.dirty = False; pt["push"] = time.time()
-        guard("補單", po.reconcile)
-        if time.time() - pt["sync"] >= 30: pt["sync"] = time.time(); guard("對帳", po.sync_deals)
+        guard("補單", po.reconcile)                       # 有送單執行緒池: 補送丟進池子並行, 不擋主迴圈
+        if time.time() - pt["sync"] >= 30 and not pt.get("syncing"):   # 對帳 (update_status) 放背景: 11-18 11:35 起每次卡 30 秒逾時, 主迴圈因此每輪 30 秒
+            pt["sync"] = time.time(); pt["syncing"] = True
+            def bg_sync():
+                try: guard("對帳", po.sync_deals)
+                finally: pt["syncing"] = False
+            threading.Thread(target=bg_sync, name="sync_deals", daemon=True).start()
         if po.dirty or time.time() - pt["push"] >= 10:
             d = po.dirty; po.dirty = False; pt["push"] = time.time()
             guard("上傳", lambda: ppub.live(paper_state("等待收盤" if po.closing else "監看中"), event=d))
