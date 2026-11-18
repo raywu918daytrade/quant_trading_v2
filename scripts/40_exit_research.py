@@ -26,6 +26,7 @@ ap.add_argument("--start", default="2020-01")
 ap.add_argument("--out", default="stats/exit_research.md")
 ap.add_argument("--cache", default=str(PROC / "exit_paths.npz"))
 ap.add_argument("--rebuild", action="store_true")
+ap.add_argument("--build-only", action="store_true", help="只建快取 (給 41 用)")
 a = ap.parse_args()
 OUT = []
 def P(*s):
@@ -104,6 +105,7 @@ def build():
     meta.to_parquet(Path(a.cache).with_suffix(".parquet"), index=False)
 
 if a.rebuild or not Path(a.cache).exists(): build()
+if a.build_only: sys.exit(0)
 Z = np.load(a.cache); meta = pd.read_parquet(Path(a.cache).with_suffix(".parquet"))
 ALLDAYS = pd.DatetimeIndex(Z["days"])
 # 只保留每日先到先做的前 10 檔 (出場法不影響誰進場: 線上名額看「已進場」不看「同時持有」)
