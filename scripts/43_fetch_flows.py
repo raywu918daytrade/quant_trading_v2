@@ -2,7 +2,9 @@
 """研究用: 抓資金流向歷史資料 (只寫 data/flows/, 不碰線上程式)。在 GHA 跑 (雲端 session 連不到證交所 / 櫃買 / FinMind)。
   1. 個股三大法人買賣超 (每日, 股數): 證交所 T86 (上市) + 櫃買 insti/dailyTrade (上櫃) → data/flows/inst_{twse,tpex}_YYYY.parquet
      欄位: date, stock_id, fi (外資, 不含外資自營商), it (投信), dl (自營商合計), tot (三大法人合計)
-  2. 八大行庫 / 分點: 免費公開來源沒有歷史資料 (證交所買賣日報表要驗證碼且只有當天) → --probe 只試 FinMind 免 token 能不能拿到。
+  2. 個股當沖成交股數 (每日): 證交所 TWTB4U + 櫃買 → data/flows/dt_{dttwse,dttpex}_YYYY.parquet (date, stock_id, dtv)
+     隔日沖分點的替代指標: 前一天當沖比重高 = 短線資金多。
+  3. 八大行庫 / 分點: 免費公開來源沒有歷史資料 (證交所買賣日報表要驗證碼且只有當天) → --probe 只試 FinMind 免 token 能不能拿到。
 已抓過的日期會跳過 (data/flows 由 actions/cache 保留), 中斷可續跑。
 用法: python3 scripts/43_fetch_flows.py [--start 2019-12-01] [--probe]"""
 import argparse, json, time, threading, traceback
@@ -64,11 +66,11 @@ def twse(d):
             if t.get("data"): f, rows = t.get("fields", []), t["data"]; break
     if not rows: return pd.DataFrame()       # 非交易日
     if a.probe: print("TWSE T86 fields", f, rows[0], flush=True)
+    ex = lambda name: next((i for i, x in enumerate(f) if str(x).strip() == name), None)
     idx = {"sid": col(f, "代號"),
-           "fi": col(f, "外", "買賣超", excl=("自營商",)) if col(f, "外陸資買賣超") is None else col(f, "外陸資買賣超", excl=("自營商",)),
-           "it": col(f, "投信", "買賣超"), "dl": col(f, "自營商買賣超股數", excl=("自行", "避險")),
-           "tot": col(f, "三大法人買賣超")}
-    if idx["dl"] is None: idx["dl"] = col(f, "自營商", "買賣超", excl=("自行", "避險", "外資", "外陸資"))
+           "fi": ex("外陸資買賣超股數(不含外資自營商)") if ex("外陸資買賣超股數(不含外資自營商)") is not None else ex("外資買賣超股數"),
+           "it": ex("投信買賣超股數"), "dl": ex("自營商買賣超股數"), "tot": ex("三大法人買賣超股數")}
+    if a.probe: print("TWSE idx", idx, flush=True)
     return to_df(rows, idx, d)
 
 def tpex(d):
@@ -90,22 +92,50 @@ def tpex(d):
         f = []
     if not rows: return pd.DataFrame()
     if a.probe: print("TPEx fields", f, rows[0], flush=True)
-    if f and col(f, "代號") is not None:
-        # 代號,名稱,外資及陸資(不含外資自營商)-買進/賣出/買賣超, 外資自營商-買/賣/超, 外資及陸資-買/賣/超, 投信-買/賣/超, 自營商(自行)..., 自營商(避險)..., 自營商-買/賣/超, 三大法人買賣超
-        hits = lambda *k: [i for i, x in enumerate(f) if all(s in str(x) for s in k)]
-        fi = [i for i in hits("買賣超") if "外資及陸資" in str(f[i]) and "不含" in str(f[i])]
-        it = [i for i in hits("買賣超") if "投信" in str(f[i])]
-        dl = [i for i in hits("買賣超") if str(f[i]).startswith("自營商") and "自行" not in str(f[i]) and "避險" not in str(f[i])]
-        idx = {"sid": col(f, "代號"), "fi": fi[0] if fi else None, "it": it[0] if it else None,
-               "dl": dl[-1] if dl else None, "tot": col(f, "三大法人")}
-    else:      # 舊格式固定位置 (24 欄)
-        idx = {"sid": 0, "fi": 4, "it": 13, "dl": 22, "tot": 23}
+    # 欄位名不分組 (都叫 買進/賣出/買賣超股數), 依序: 外資及陸資(不含外資自營商) 2-4, 外資自營商 5-7, 外資及陸資合計 8-10,
+    # 投信 11-13, 自營商(自行) 14-16, 自營商(避險) 17-19, 自營商合計 20-22, 三大法人合計 23 (舊網址 aaData 同順序)
+    if len(rows[0]) < 24: print(f"[tpex] {d} 欄數 {len(rows[0])} 不符", flush=True); return None
+    idx = {"sid": 0, "fi": 4, "it": 13, "dl": 22, "tot": 23}
     if a.probe: print("TPEx idx", idx, flush=True)
     return to_df(rows, idx, d)
 
+def dt_twse(d):
+    """當日沖銷交易標的 (上市): 當沖成交股數 / 買進金額 / 賣出金額 → dtv (當沖股數)。"""
+    r = get(f"https://www.twse.com.tw/rwd/zh/dayTrading/TWTB4U?date={d:%Y%m%d}&selectType=All&response=json")
+    if r is None: return None
+    j = r.json(); f, rows = [], []
+    for t in j.get("tables", []):
+        if t.get("data") and any("代號" in str(x) for x in t.get("fields", [])): f, rows = t["fields"], t["data"]
+    if not rows: return pd.DataFrame()
+    if a.probe: print("TWSE 當沖 fields", f, rows[0], flush=True)
+    i_s, i_v = col(f, "代號"), col(f, "成交股數")
+    return pd.DataFrame({"date": str(d), "stock_id": [str(r[i_s]).strip() for r in rows], "dtv": [num(r[i_v]) for r in rows]})
+
+def dt_tpex(d):
+    roc = f"{d.year - 1911}/{d:%m/%d}"
+    tries = [("POST", "https://www.tpex.org.tw/www/zh-tw/intraday/trading", {"date": f"{d:%Y/%m/%d}", "response": "json"}),
+             ("GET", f"https://www.tpex.org.tw/web/stock/trading/intraday_trading/intraday_trading_list_result.php?l=zh-tw&d={roc}&o=json", None)]
+    for m, u, data in tries:
+        r = get(u, m, tries=2, data=data) if data else get(u, tries=2)
+        if r is None: continue
+        try: j = r.json()
+        except Exception: continue
+        f, rows = [], []
+        for t in j.get("tables", []):
+            if t.get("data") and len(t["data"]) > 20: f, rows = t.get("fields", []), t["data"]
+        if not rows and j.get("aaData"): rows = j["aaData"]
+        if a.probe: print("TPEx 當沖", u, f, rows[:2], flush=True)
+        if not rows: continue
+        i_s = col(f, "代號") if f else 0
+        i_v = col(f, "成交股數") if f else 2
+        if i_s is None or i_v is None: continue
+        return pd.DataFrame({"date": str(d), "stock_id": [str(r[i_s]).strip() for r in rows], "dtv": [num(r[i_v]) for r in rows]})
+    return pd.DataFrame()
+
 def run(name, fn, days, sleep):
     have = set()
-    for p in OUT.glob(f"inst_{name}_*.parquet"):
+    pre = "dt" if name.startswith("dt") else "inst"
+    for p in OUT.glob(f"{pre}_{name}_*.parquet"):
         have |= set(pd.read_parquet(p, columns=["date"]).date.astype(str))
     ef = OUT / f"empty_{name}.txt"
     done = set(ef.read_text().split()) if ef.exists() else set()
@@ -114,7 +144,7 @@ def run(name, fn, days, sleep):
     buf, n = {}, 0
     def flush():
         for y, parts in buf.items():
-            p = OUT / f"inst_{name}_{y}.parquet"
+            p = OUT / f"{pre}_{name}_{y}.parquet"
             old = [pd.read_parquet(p)] if p.exists() else []
             pd.concat(old + parts, ignore_index=True).drop_duplicates(["date", "stock_id"], keep="last").to_parquet(p, index=False)
         buf.clear(); ef.write_text("\n".join(sorted(done)))
@@ -156,12 +186,14 @@ days = [d for d in days if d.weekday() < 5]
 if a.probe:
     probe_finmind()
     for d in [date(2020, 3, 2), date(2024, 1, 2), date(2026, 11, 17)]:
-        for nm, fn in [("twse", twse), ("tpex", tpex)]:
+        for nm, fn in [("twse", twse), ("tpex", tpex), ("dttwse", dt_twse), ("dttpex", dt_tpex)]:
             x = fn(d); print(nm, d, None if x is None else len(x), flush=True)
-            if x is not None and len(x): print(x.head(3).to_string(), "\n", x[x.stock_id == ("2330" if nm == "twse" else "6488")].to_string(), flush=True)
+            if x is not None and len(x): print(x.head(3).to_string(), "\n", x[x.stock_id.isin(["2330", "2618", "6488"])].to_string(), flush=True)
     raise SystemExit
-th = [threading.Thread(target=run, args=("twse", twse, days, 3.2)),
-      threading.Thread(target=run, args=("tpex", tpex, days, 2.0))]
+th = [threading.Thread(target=run, args=("twse", twse, days, 5.0)),
+      threading.Thread(target=run, args=("tpex", tpex, days, 3.0)),
+      threading.Thread(target=run, args=("dttwse", dt_twse, days, 5.0)),
+      threading.Thread(target=run, args=("dttpex", dt_tpex, days, 3.0))]
 [t.start() for t in th]; [t.join() for t in th]
 for p in sorted(OUT.glob("*.parquet")):
-    x = pd.read_parquet(p); print(p.name, len(x), x.date.min(), x.date.max(), x[["fi", "it", "dl", "tot"]].isna().mean().round(3).to_dict())
+    x = pd.read_parquet(p); print(p.name, len(x), x.date.min(), x.date.max(), x.drop(columns=["date", "stock_id"]).isna().mean().round(3).to_dict())
