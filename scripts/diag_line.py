@@ -12,7 +12,9 @@ def get(path, **params):
     return r.status_code, (r.json() if r.headers.get("content-type", "").startswith("application/json") else r.text[:200])
 q, c = get("message/quota"), get("message/quota/consumption")
 print("本月額度:", q, "\n本月已用:", c)
-tw = datetime.now(timezone(timedelta(hours=8)))
-for d in range(1, 8):                         # LINE 的每日統計隔天才有
-    ds = (tw - timedelta(days=d)).strftime("%Y%m%d")
-    print(ds, "push 送出:", get("message/delivery/push", date=ds))
+tw = datetime.now(timezone(timedelta(hours=8))); tot = 0
+for d in range(1, tw.day):                    # 本月 1 日到昨天 (LINE 的每日統計隔天才有)
+    ds = tw.replace(day=d).strftime("%Y%m%d"); st, j = get("message/delivery/push", date=ds)
+    k = j.get("success", 0) if isinstance(j, dict) else 0; tot += k or 0
+    print(ds, "push 送出:", st, j)
+if c[0] == 200: print(f"本月到昨天 push {tot} 則 → 今天已送出約 {c[1].get('totalUsage', 0) - tot} 則 (已用量也含 multicast / broadcast)")
