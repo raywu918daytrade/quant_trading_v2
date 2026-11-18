@@ -36,6 +36,24 @@ STOP_SLIP, SLIP, FORCE, FORCE_SLIP = 0.001, 0.001, 0.08, 0.002
 T0 = time.time()
 
 # =============================== 1. 建立每筆交易進場後的 1 分 K 路徑 ===============================
+def load_industry(info):
+    """產業別: info 有欄位就用, 否則證交所 / 櫃買 OpenAPI (同 34)。"""
+    col = next((c for c in ["industry_category", "industry", "產業別", "sector", "category"] if c in info.columns), None)
+    if col is not None:
+        ind = info[["stock_id", col]].rename(columns={col: "ind"}).astype(str)
+    else:
+        import requests
+        rows = []
+        for url, k_id, k_ind in [("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", "公司代號", "產業別"),
+                                 ("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", "SecuritiesCompanyCode", "SecuritiesIndustryCode")]:
+            try:
+                js = requests.get(url, timeout=30).json(); rows += [(str(r[k_id]).strip(), str(r[k_ind]).strip()) for r in js]
+            except Exception as e: print("產業別下載失敗", url, e)
+        ind = pd.DataFrame(rows, columns=["stock_id", "ind"])
+    ind = ind[ind.ind.notna() & ~ind.ind.isin(["", "nan", "None"])].drop_duplicates("stock_id")
+    print(f"產業別 {len(ind):,} 檔, {ind.ind.nunique()} 類", flush=True)
+    return ind
+
 def build():
     from huggingface_hub import hf_hub_download, HfApi
     hf = lambda p: hf_hub_download(HF_REPO, p, repo_type="dataset")
@@ -66,7 +84,10 @@ def build():
     U = d[(d.dv20 >= 3e8) & (d.pc >= 10) & (d.pc <= 300) & (d.atr20 >= 0.03) & (d.gap >= 0.02) & (d.mkt_gap >= -0.01)
           & (d.date.dt.dayofweek != 0)][["stock_id", "date", "pc", "vol20", "gap", "atr20", "pchg", "streak", "d_h20", "mkt_gap"]].copy()
     print(f"D1 完成, 候選股票日 {len(U):,} ({time.time()-T0:.0f}s)", flush=True)
-    META, ARR, DAYS = [], {k: [] for k in "ohlcv"}, []
+    # 大盤 / 類股盤中: 均額 ≥1 億、昨收 ≥10 的上市櫃股票, 每分鐘 (收盤 / 當日第一根開盤 − 1) 等權平均
+    IND = load_industry(info)
+    LIQ = d[(d.dv20 >= 1e8) & (d.pc >= 10)][["stock_id", "date"]].merge(IND, on="stock_id", how="left")
+    META, ARR, DAYS = [], {k: [] for k in ["o", "h", "l", "c", "v", "mk", "sc"]}, []
     for f in m1m:
         ym = f[6:13]; t1 = time.time()
         m = pd.read_parquet(hf(f), columns=["stock_id", "date", "open", "high", "low", "close", "volume"])
@@ -76,6 +97,13 @@ def build():
         DAYS += sorted(m.date.unique())
         u = U[U.date.dt.strftime("%Y_%m") == ym]
         key = ["stock_id", "date"]
+        mq = m.merge(LIQ[LIQ.date.dt.strftime("%Y_%m") == ym], on=key).drop_duplicates(key + ["t"], keep="last").sort_values(key + ["t"])
+        mq["r"] = mq.close.astype("float64") / mq.groupby(key).open.transform("first").astype("float64") - 1
+        MKT = mq.groupby(["date", "t"]).r.mean().unstack("t").reindex(columns=range(NT))
+        mqi = mq[mq.ind.notna()]
+        SSUM = mqi.groupby(["date", "ind", "t"]).r.sum().unstack("t").reindex(columns=range(NT))
+        SCNT = mqi.groupby(["date", "ind", "t"]).r.count().unstack("t").reindex(columns=range(NT))
+        del mq, mqi
         m = m.merge(u[key], on=key)
         if not len(m): print(ym, "無候選"); continue
         m = m.drop_duplicates(key + ["t"], keep="last").sort_values(key + ["t"]).reset_index(drop=True)
@@ -96,6 +124,12 @@ def build():
         z = m.merge(x[key + ["i"]], on=key)
         for k, c in zip("ohlcv", ["open", "high", "low", "close", "volume"]):
             A = np.full((len(x), NT), np.nan, dtype="float32"); A[z.i.values, z.t.values] = z[c].values; ARR[k].append(A)
+        ARR["mk"].append(MKT.reindex(x.date.values).values.astype("float32"))
+        xi = x.merge(IND, on="stock_id", how="left")
+        own = ARR["c"][-1] / ARR["o"][-1][np.arange(len(x)), np.argmax(~np.isnan(ARR["o"][-1]), 1)][:, None] - 1
+        ix = pd.MultiIndex.from_arrays([xi.date.values, xi.ind.values])
+        ss = SSUM.reindex(ix).values; cc = SCNT.reindex(ix).values
+        ARR["sc"].append(np.where(cc - 1 >= 3, (ss - np.nan_to_num(own)) / (cc - 1), np.nan).astype("float32"))   # 同類股扣掉自己, 至少 3 檔
         META.append(x[key + ["pc", "rh", "rl", "et", "E", "gap", "atr20", "pchg", "streak", "d_h20", "mkt_gap"]])
         print(f"{ym}: {len(x)} 筆 ({time.time()-t1:.0f}s, 累計 {time.time()-T0:.0f}s)", flush=True)
         try: Path(hf(f)).resolve().unlink()

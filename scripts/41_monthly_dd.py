@@ -156,24 +156,26 @@ EXITV = ret(CF * (1 + SLIP))
 o_stop = np.where(np.isnan(O), RH, O)
 STOPV = (-(capf(np.maximum(RH, o_stop) * (1 + STOP_SLIP)) / E - 1) - COST) * 100
 CLOSEV = ret(CF[:, 270])
-def values(pol):
+def values(pol, S=None):
+    S = STATE if S is None else S
     D = np.zeros((N, NT + 1)); D[:, NT] = CLOSEV; D[:, 270] = np.where(STOP_HIT[:, 270], STOPV[:, 270], CLOSEV)
     for u in range(269, -1, -1):
-        ex = pol[STATE[:, u]] & (u <= T_LAST)
+        ex = pol[S[:, u]] & (u <= T_LAST)
         D[:, u] = np.where(STOP_HIT[:, u], STOPV[:, u], np.where(ex, EXITV[:, u], D[:, u + 1]))
     return D
-def apply(pol):
-    D = values(pol); return D[np.arange(N), np.minimum(ET[:, 0] + 1, NT)]
-def train(mask, kappa, iters=4, min_trades=60, margin=0.02):
+def apply(pol, S=None):
+    D = values(pol, S); return D[np.arange(N), np.minimum(ET[:, 0] + 1, NT)]
+def train(mask, kappa, iters=4, min_trades=60, margin=0.02, S=None, ns=None):
+    S = STATE if S is None else S; ns = NS if ns is None else ns
     u = lambda x: np.where(x >= 0, x, (1 + kappa) * x)
-    pol = np.zeros(NS, bool); rows = np.where(mask)[0]
+    pol = np.zeros(ns, bool); rows = np.where(mask)[0]
     dec = AFT[rows] & (TT <= T_LAST) & ~STOP_HIT[rows]; rr, cc = np.nonzero(dec)
-    s_ = STATE[rows][rr, cc]; ev = u(EXITV[rows][rr, cc]); w_ = WT[rows][rr]
+    s_ = S[rows][rr, cc]; ev = u(EXITV[rows][rr, cc]); w_ = WT[rows][rr]
     for _ in range(iters):
-        hv = u(values(pol)[rows][rr, cc + 1])
+        hv = u(values(pol, S)[rows][rr, cc + 1])
         df = pd.DataFrame(dict(s=s_, d=(ev - hv) * w_, w=w_, n=rr))
         g = df.groupby("s").agg(d=("d", "sum"), w=("w", "sum"), nt=("n", "nunique")); g["d"] = g.d / g.w
-        new = np.zeros(NS, bool); new[g[(g.nt >= min_trades) & (g.d > margin)].index.values] = True
+        new = np.zeros(ns, bool); new[g[(g.nt >= min_trades) & (g.d > margin)].index.values] = True
         if (new == pol).all(): break
         pol = new
     return pol
@@ -256,6 +258,43 @@ for nm in ["現行", "賺 2% 後停損移到進場價", "賺 2% 後從最低反�
     r, intr = EXITS[nm]; r1 = r - TKP * 100 * (1 + intr)
     P(line(nm, st(daily(r1))))
     P(line(nm + " + 月虧 10 萬停做", st(overlay(daily(r1), "loss", 10, 0.0))))
+
+# ---------------- 7. RL + 大盤 / 類股 ----------------
+if "mk" in Z.files:
+    MK = Z["mk"][J].astype("float64") * 100; SC = Z["sc"][J].astype("float64") * 100     # 當日開盤起漲跌%
+    MKF = pd.DataFrame(MK).ffill(axis=1).values; SCF = pd.DataFrame(SC).ffill(axis=1).values
+    ar = np.arange(N)
+    dM = MKF - MKF[ar, ET[:, 0]][:, None]                     # 進場後大盤 (等權) 漲跌, 百分點; 空單: 漲 = 不利
+    dS = SCF - SCF[ar, ET[:, 0]][:, None]                     # 進場後同類股 (扣自己) 漲跌
+    P(""); P("## 7. RL 加大盤 / 類股 (Ray 2026-11-18)")
+    P(f"大盤 = 均額 ≥1 億上市櫃股票每分鐘「相對當日開盤」等權平均; 類股 = 同產業 (扣掉自己, ≥3 檔) 同樣算法; 有類股的交易 {np.isfinite(SC[ar, ET[:, 0]]).mean()*100:.0f}%。")
+    P("狀態改用粗一點的格子 (時段 4 × 浮動損益 4 × VWAP 上下 2 = 32), 再乘上: 進場後大盤漲跌 3 格 (<−0.3 / ±0.3 / >+0.3 百分點)、進場後類股漲跌 4 格 (<−0.5 / ±0.5 / >+0.5 / 無類股)。")
+    P(f"相關: 進場後到收盤 大盤漲跌 vs 本筆報酬 {np.corrcoef(np.nan_to_num(dM[:, 270]), base_r)[0, 1]:+.2f}, 類股 {np.corrcoef(np.nan_to_num(dS[:, 270]), base_r)[0, 1]:+.2f} (負 = 大盤/類股漲, 空單賠)")
+    TB4 = np.digitize(TT + 0 * ET, [60, 120, 210]); PB4 = np.digitize(PNL, [0, 1, 3]); VB = (CF > VWAP).astype(int)
+    S0 = (TB4 * 4 + PB4) * 2 + VB; n0 = 32
+    MB = np.digitize(np.nan_to_num(dM), [-0.3, 0.3]); SB = np.where(np.isnan(dS), 3, np.digitize(np.nan_to_num(dS), [-0.5, 0.5]))
+    VAR = {"RL 只用個股 (粗格)": (S0, n0), "RL + 大盤": (S0 * 3 + MB, n0 * 3), "RL + 類股": (S0 * 4 + SB, n0 * 4), "RL + 大盤 + 類股": ((S0 * 3 + MB) * 4 + SB, n0 * 12)}
+    R7 = {"現行": base_r}
+    for nm, (S_, n_) in VAR.items():
+        for kappa in (0.0, 1.0):
+            r_o = base_r.copy(); k_on = []
+            for y in TEST_YEARS:
+                pol = train(YEAR < y, kappa, S=S_, ns=n_, min_trades=40); r_o = np.where(YEAR == y, apply(pol, S_), r_o); k_on.append(int(pol.sum()))
+            R7[f"{nm}, κ={kappa}"] = r_o
+            pol = train(YEAR <= 2023, kappa, S=S_, ns=n_, min_trades=40)
+            R7[f"{nm}, κ={kappa} [固定: ≤2023 訓練]"] = apply(pol, S_)
+            P(f"- {nm}, κ={kappa}: 走動式各年平倉狀態數 {k_on}; 固定訓練 {int(pol.sum())} 個")
+    for x in (0.3, 0.5, 1.0): R7[f"規則: 進場後大盤漲 ≥{x} 點就出"] = simulate(sig=(dM >= x))[0]
+    for x in (0.5, 1.0, 2.0): R7[f"規則: 進場後類股漲 ≥{x} 點就出"] = simulate(sig=(dS >= x))[0]
+    R7["規則: 賺 2% 後從最低反彈 3% 出"] = EXITS["賺 2% 後從最低反彈 3% 出"][0]
+    print(f"RL 大盤/類股 完成 ({time.time()-T0:.0f}s)", flush=True)
+    V24 = [y for y in TEST_YEARS if y >= 2024]
+    for title, yrs in [(f"走動式樣本外 {TEST_YEARS[0]}~{TEST_YEARS[-1]} (固定訓練版只看 2024~)", TEST_YEARS), ("驗證期 2024~ (≤2023 決定)", V24)]:
+        P(""); P(f"### {title}"); P(""); [P(h) for h in HD]
+        for nm, r in R7.items():
+            if "[固定" in nm and yrs is TEST_YEARS: continue
+            P(line(nm, st(sub(daily(r), yrs))))
+    P(""); P("規則參數在全期看過, 只供參考 (沒有走動式)。")
 
 Path(a.out).parent.mkdir(parents=True, exist_ok=True)
 Path(a.out).write_text("\n".join(OUT) + "\n", encoding="utf-8")
