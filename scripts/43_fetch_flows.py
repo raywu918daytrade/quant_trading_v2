@@ -17,6 +17,7 @@ OUT = ROOT / "data" / "flows"; OUT.mkdir(parents=True, exist_ok=True)
 ap = argparse.ArgumentParser()
 ap.add_argument("--start", default="2019-12-01")
 ap.add_argument("--end", default=str(date.today()))
+ap.add_argument("--max-min", type=float, default=50, help="每個來源最多抓幾分鐘, 時間到就停 (下次接著抓)")
 ap.add_argument("--probe", action="store_true", help="只試抓幾天 / 試 FinMind 資料集, 印欄位")
 a = ap.parse_args()
 UA = {"User-Agent": "Mozilla/5.0 (research script)"}
@@ -151,7 +152,10 @@ def run(name, fn, days, sleep):
             old = [pd.read_parquet(p)] if p.exists() else []
             pd.concat(old + parts, ignore_index=True).drop_duplicates(["date", "stock_id"], keep="last").to_parquet(p, index=False)
         buf.clear(); ef.write_text("\n".join(sorted(done)))
+    t0 = time.time()
     for d in todo:
+        if time.time() - t0 > a.max_min * 60:
+            print(f"[{name}] 時間到 ({a.max_min:g} 分), 停在 {d}", flush=True); break
         try: x = fn(d)
         except StopIteration:
             print(f"[{name}] 找不到可用來源, 放棄", flush=True); break
