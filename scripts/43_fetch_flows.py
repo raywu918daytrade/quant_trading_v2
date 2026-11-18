@@ -111,26 +111,32 @@ def dt_twse(d):
     i_s, i_v = col(f, "代號"), col(f, "成交股數")
     return pd.DataFrame({"date": str(d), "stock_id": [str(r[i_s]).strip() for r in rows], "dtv": [num(r[i_v]) for r in rows]})
 
+DT_TPEX_FAIL = [0]
 def dt_tpex(d):
+    """當日沖銷交易統計 (上櫃): 試幾個網址, 取含「成交股數」欄位的表; 連續 5 個交易日都找不到就放棄 (不記成已抓)。"""
+    if DT_TPEX_FAIL[0] >= 5: raise StopIteration
     roc = f"{d.year - 1911}/{d:%m/%d}"
-    tries = [("POST", "https://www.tpex.org.tw/www/zh-tw/intraday/trading", {"date": f"{d:%Y/%m/%d}", "response": "json"}),
+    tries = [("POST", "https://www.tpex.org.tw/www/zh-tw/intraday/stat", {"date": f"{d:%Y/%m/%d}", "response": "json"}),
+             ("POST", "https://www.tpex.org.tw/www/zh-tw/intraday/trading", {"date": f"{d:%Y/%m/%d}", "response": "json"}),
+             ("GET", f"https://www.tpex.org.tw/web/stock/trading/intraday_stat/intraday_trading_stat_result.php?l=zh-tw&d={roc}&o=json", None),
              ("GET", f"https://www.tpex.org.tw/web/stock/trading/intraday_trading/intraday_trading_list_result.php?l=zh-tw&d={roc}&o=json", None)]
     for m, u, data in tries:
-        r = get(u, m, tries=2, data=data) if data else get(u, tries=2)
+        r = get(u, m, tries=1, data=data) if data else get(u, tries=1)
         if r is None: continue
         try: j = r.json()
         except Exception: continue
-        f, rows = [], []
-        for t in j.get("tables", []):
-            if t.get("data") and len(t["data"]) > 20: f, rows = t.get("fields", []), t["data"]
-        if not rows and j.get("aaData"): rows = j["aaData"]
-        if a.probe: print("TPEx 當沖", u, f, rows[:2], flush=True)
-        if not rows: continue
-        i_s = col(f, "代號") if f else 0
-        i_v = col(f, "成交股數") if f else 2
-        if i_s is None or i_v is None: continue
-        return pd.DataFrame({"date": str(d), "stock_id": [str(r[i_s]).strip() for r in rows], "dtv": [num(r[i_v]) for r in rows]})
-    return pd.DataFrame()
+        tabs = [(t.get("fields", []), t.get("data") or []) for t in j.get("tables", [])]
+        if j.get("aaData"): tabs.append((j.get("fields") or [], j["aaData"]))
+        for f, rows in tabs:
+            if a.probe or DT_TPEX_FAIL[0] == 0 and not rows: pass
+            i_s, i_v = col(f, "代號"), col(f, "成交股數")
+            if rows and i_s is not None and i_v is not None:
+                if a.probe: print("TPEx 當沖 OK", u, f, rows[0], flush=True)
+                DT_TPEX_FAIL[0] = -999
+                return pd.DataFrame({"date": str(d), "stock_id": [str(r[i_s]).strip() for r in rows], "dtv": [num(r[i_v]) for r in rows]})
+        print(f"  TPEx 當沖 {u.split('tpex.org.tw')[1][:60]}: 表 {[ (len(f), len(rw)) for f, rw in tabs]} 欄位 {[f for f, _ in tabs][:2]}", flush=True)
+    if DT_TPEX_FAIL[0] >= 0: DT_TPEX_FAIL[0] += 1
+    return None
 
 def run(name, fn, days, sleep):
     have = set()
@@ -150,6 +156,8 @@ def run(name, fn, days, sleep):
         buf.clear(); ef.write_text("\n".join(sorted(done)))
     for d in todo:
         try: x = fn(d)
+        except StopIteration:
+            print(f"[{name}] 找不到可用來源, 放棄", flush=True); break
         except Exception:
             traceback.print_exc(); x = None
         if x is None: print(f"[{name}] {d} 失敗", flush=True)
