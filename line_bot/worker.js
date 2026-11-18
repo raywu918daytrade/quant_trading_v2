@@ -19,6 +19,15 @@ const COMMANDS = [
   { keys: ["網頁", "web", "w"], desc: "網頁　今日持倉頁 / 訊號頁 / 回測頁", run: () => [card({ title: "網頁", blocks: [link("今日持倉 / 損益", SITE + "today.html"), link("即時訊號 vs 模擬單", SITE + "index.html#live"), link("歷史回測", SITE + "index.html")] })] },
   { keys: ["說明", "help", "?", "？", "指令"], desc: "說明　列出所有指令", run: () => [help()] },
 ];
+// 每則回覆最後一則訊息下方的快捷按鈕 (Quick Reply), 和 rich menu 同四格; 桌機 LINE 沒有 rich menu 時可用。只加在 reply, 不影響 push 額度。
+const QUICK = { items: [
+  { type: "action", action: { type: "message", label: "今日", text: "今日" } },
+  { type: "action", action: { type: "message", label: "績效", text: "績效" } },
+  { type: "action", action: { type: "message", label: "狀態", text: "狀態" } },
+  { type: "action", action: { type: "uri", label: "網頁", uri: SITE + "today.html" } },
+] };
+// LINE 只認一組訊息中最後一則的 quickReply → 先截到 5 則, 再加在最後一則
+export const withQuick = (messages) => { const m = messages.slice(0, 5); if (m.length) m[m.length - 1] = { ...m[m.length - 1], quickReply: QUICK }; return m; };
 // 四碼數字 = 查個股 (今天的監看狀態 + K 線按鈕)
 const STOCK = /^\d{4}$/;
 
@@ -231,9 +240,9 @@ async function reply(env, token, messages) {
 export async function handle(input, ctxLoader = loadCtx) {
   const s = input.trim().replace(/^[\/!！]/, "");
   const cmd = COMMANDS.find((c) => c.keys.some((k) => k.toLowerCase() === s.toLowerCase()));
-  if (cmd) return cmd.run(await ctxLoader(cmd.need), "");
-  if (STOCK.test(s)) return stock(await ctxLoader(), s);
-  return [help()];
+  if (cmd) return withQuick(await cmd.run(await ctxLoader(cmd.need), ""));
+  if (STOCK.test(s)) return withQuick(await stock(await ctxLoader(), s));
+  return withQuick([help()]);
 }
 export default {
   async fetch(req, env, ectx) {
@@ -248,7 +257,7 @@ export default {
       const input = e.type === "message" && e.message.type === "text" ? e.message.text : e.type === "postback" ? e.postback.data : "";
       if (!input) return;
       try { await reply(env, e.replyToken, await handle(input)); }
-      catch (err) { await reply(env, e.replyToken, [text(`查詢失敗：${err.message}`)]); }
+      catch (err) { await reply(env, e.replyToken, withQuick([text(`查詢失敗：${err.message}`)])); }
     })));
     return new Response("ok");   // LINE 要求 1 秒內回 200; 實際回覆在 waitUntil 裡做
   },
