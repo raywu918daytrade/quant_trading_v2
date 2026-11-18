@@ -55,10 +55,15 @@ def build():
     sh = lambda s, n: g[s].transform(lambda x: x.shift(1).rolling(n, min_periods=n).mean())
     d["atr20"] = sh("rng", 20); d["dv20"] = sh("dvv", 20); d["vol20"] = sh("volume", 20)
     d["gap"] = d.open / d.pc - 1
+    d["pchg"] = d.pc / g.close.shift(2) - 1                                   # 昨日漲跌
+    up = (g.close.diff() > 0).astype(int)
+    d["streak"] = up.groupby(d.stock_id).transform(lambda x: x.groupby((x == 0).cumsum()).cumsum().shift(1)).fillna(0)   # 到昨天連漲幾天
+    d["h20"] = g.high.transform(lambda x: x.shift(1).rolling(20, min_periods=20).max())
+    d["d_h20"] = d.open / d.h20 - 1                                           # 開盤 vs 前 20 日最高
     liq = d[(d.dv20 >= 1e8) & d.pc.notna() & d.gap.notna()]
     d = d.merge(liq.groupby("date").gap.mean().rename("mkt_gap"), on="date", how="left")
     U = d[(d.dv20 >= 3e8) & (d.pc >= 10) & (d.pc <= 300) & (d.atr20 >= 0.03) & (d.gap >= 0.02) & (d.mkt_gap >= -0.01)
-          & (d.date.dt.dayofweek != 0)][["stock_id", "date", "pc", "vol20"]].copy()
+          & (d.date.dt.dayofweek != 0)][["stock_id", "date", "pc", "vol20", "gap", "atr20", "pchg", "streak", "d_h20", "mkt_gap"]].copy()
     print(f"D1 完成, 候選股票日 {len(U):,} ({time.time()-T0:.0f}s)", flush=True)
     META, ARR, DAYS = [], {k: [] for k in "ohlcv"}, []
     for f in m1m:
@@ -90,7 +95,7 @@ def build():
         z = m.merge(x[key + ["i"]], on=key)
         for k, c in zip("ohlcv", ["open", "high", "low", "close", "volume"]):
             A = np.full((len(x), NT), np.nan, dtype="float32"); A[z.i.values, z.t.values] = z[c].values; ARR[k].append(A)
-        META.append(x[key + ["pc", "rh", "rl", "et", "E"]])
+        META.append(x[key + ["pc", "rh", "rl", "et", "E", "gap", "atr20", "pchg", "streak", "d_h20", "mkt_gap"]])
         print(f"{ym}: {len(x)} 筆 ({time.time()-t1:.0f}s, 累計 {time.time()-T0:.0f}s)", flush=True)
         try: Path(hf(f)).resolve().unlink()
         except Exception: pass
@@ -265,30 +270,33 @@ o_stop = np.where(np.isnan(O), RH, O)
 STOPV = (-(np.minimum(np.maximum(RH, o_stop) * (1 + STOP_SLIP), PC * (1 + FORCE) * (1 + FORCE_SLIP)) / E - 1) - COST) * 100
 CLOSEV = ret(CF[:, 270])
 T_LAST = 264                                                               # 13:24 收盤前最後一次決策
-def values(pol):
+def values(pol, S=None):
     """pol: NS 布林 (True = 平倉)。回傳 D (N×NT): 「持有進入第 u 分鐘」的報酬, 照政策走。"""
     D = np.zeros((N, NT + 1)); D[:, NT] = CLOSEV; D[:, 270] = np.where(STOP_HIT[:, 270], STOPV[:, 270], CLOSEV)
     for u in range(269, -1, -1):
-        ex = pol[STATE[:, u]] & (u <= T_LAST)
+        ex = pol[(STATE if S is None else S)[:, u]] & (u <= T_LAST)
         D[:, u] = np.where(STOP_HIT[:, u], STOPV[:, u], np.where(ex, EXITV[:, u], D[:, u + 1]))
     return D
-def train(mask, iters=4, min_trades=60, margin=0.02):
-    pol = np.zeros(NS, bool)
+def train(mask, iters=4, min_trades=60, margin=0.02, S=None, ns=None, lam=0.0):
+    """lam > 0: 風險趨避, 比較 平均 − lam×變異數 (續抱的報酬變異大, 越大越傾向提早平倉 → 降回撤)。"""
+    S = STATE if S is None else S; ns = NS if ns is None else ns
+    pol = np.zeros(ns, bool)
     rows = np.where(mask)[0]
     dec = AFT[rows] & (TT <= T_LAST) & ~STOP_HIT[rows]
     rr, cc = np.nonzero(dec)
-    st = STATE[rows][rr, cc]; ev = EXITV[rows][rr, cc]
+    st = S[rows][rr, cc]; ev = EXITV[rows][rr, cc]
     for it in range(iters):
-        D = values(pol)[rows]
+        D = values(pol, S)[rows]
         hv = D[rr, cc + 1]
-        df = pd.DataFrame(dict(s=st, d=ev - hv, n=rr))
-        g = df.groupby("s").agg(d=("d", "mean"), nt=("n", "nunique"))
-        new = np.zeros(NS, bool); ok = g[(g.nt >= min_trades) & (g.d > margin)].index.values; new[ok] = True
+        df = pd.DataFrame(dict(s=st, d=ev - hv, n=rr, h=hv, e=ev))
+        g = df.groupby("s").agg(d=("d", "mean"), nt=("n", "nunique"), vh=("h", "var"), ve=("e", "var"))
+        g["d"] = g.d - lam * (g.ve.fillna(0) - g.vh.fillna(0))
+        new = np.zeros(ns, bool); ok = g[(g.nt >= min_trades) & (g.d > margin)].index.values; new[ok] = True
         if (new == pol).all(): break
         pol = new
     return pol
-def apply(pol):
-    D = values(pol)
+def apply(pol, S=None):
+    D = values(pol, S)
     # 實際報酬 = 進場那分鐘之後第一分鐘起持有
     return D[np.arange(N), np.minimum(ET[:, 0] + 1, NT)]
 def rl_desc(pol):
@@ -307,7 +315,25 @@ for y in TEST_YEARS:
     pol = train(YEAR < y); r = apply(pol)
     rl_oos = np.where(YEAR == y, r, rl_oos); rl_info.append((y, int(pol.sum())))
 pol_all = train(np.ones(N, bool))
+# RL + D1: 狀態再乘上一個日K特徵 (訓練期中位數切兩半; 連漲以 ≥2 天切), 一次加一個, 看樣本外有沒有變好
+D1F = {"跳空幅度": "gap", "ATR20": "atr20", "昨日漲跌": "pchg", "連漲天數": "streak", "開盤 vs 前20日高": "d_h20", "大盤平均跳空": "mkt_gap"}
+d1_rows = []
+for lab, col in D1F.items():
+    v = meta[col].values.astype(float)
+    r_o = base_r.copy(); ns_on = []
+    for y in TEST_YEARS:
+        tr = YEAR < y
+        cut = 2 if col == "streak" else np.nanmedian(v[tr])
+        b = (np.nan_to_num(v, nan=cut) >= cut).astype(int)[:, None]
+        S2 = STATE * 2 + b; pol = train(tr, S=S2, ns=NS * 2)
+        r_o = np.where(YEAR == y, apply(pol, S2), r_o); ns_on.append(int(pol.sum()))
+    WF[f"RL + 日K: {lab}"] = (r_o, [f"{y}:{k} 個狀態平倉" for y, k in zip(TEST_YEARS, ns_on)])
 WF["RL (Q-learning 續抱/平倉)"] = (rl_oos, [f"{y}:{k} 個狀態平倉" for y, k in rl_info])
+for lam in (0.02, 0.05, 0.1):
+    r_o = base_r.copy(); ns_on = []
+    for y in TEST_YEARS:
+        pol = train(YEAR < y, lam=lam); r_o = np.where(YEAR == y, apply(pol), r_o); ns_on.append(int(pol.sum()))
+    WF[f"RL 風險趨避 λ={lam}"] = (r_o, [f"{y}:{k} 個狀態平倉" for y, k in zip(TEST_YEARS, ns_on)])
 # 13:25 前平倉的版本 (收盤競價改成 13:25 市價)
 r1325 = R_time(265)[0]
 print(f"RL 完成 ({time.time()-T0:.0f}s)", flush=True)
