@@ -16,6 +16,7 @@ from config import EXPLORE_END, PROC, ROOT, HF_REPO
 ap = argparse.ArgumentParser()
 ap.add_argument("--inp", default=str(PROC / "d1_sr_orb.parquet"))
 ap.add_argument("--out", default="stats/money_flow.md")
+ap.add_argument("--d1", default="", help="測試用: 本地日K parquet (不從 HF 下載)")
 a = ap.parse_args()
 OUT = []
 def P(*s):
@@ -38,16 +39,18 @@ A["exp"] = A.date <= EXP
 A = A.sort_values("date").reset_index(drop=True)
 
 # ---------------- HF 日K (收盤價 / 成交量) ----------------
-from huggingface_hub import hf_hub_download, HfApi
-files = sorted(f for f in HfApi().list_repo_files(HF_REPO, repo_type="dataset") if f.startswith("db/d1/") and f.endswith(".parquet") and f[6:10] >= "2019")
-D = pd.concat([pd.read_parquet(hf_hub_download(HF_REPO, f, repo_type="dataset"), columns=["stock_id", "date", "close", "volume"]) for f in files], ignore_index=True)
+def wide(df, c):
+    return df.pivot_table(index="date", columns="stock_id", values=c, aggfunc="last")
+if a.d1: D = pd.read_parquet(a.d1)
+else:
+    from huggingface_hub import hf_hub_download, HfApi
+    files = sorted(f for f in HfApi().list_repo_files(HF_REPO, repo_type="dataset") if f.startswith("db/d1/") and f.endswith(".parquet") and f[6:10] >= "2019")
+    D = pd.concat([pd.read_parquet(hf_hub_download(HF_REPO, f, repo_type="dataset"), columns=["stock_id", "date", "close", "volume"]) for f in files], ignore_index=True)
 D["stock_id"] = D.stock_id.astype(str); D["date"] = pd.to_datetime(D.date).dt.normalize()
 D = D[D.stock_id.str.fullmatch(r"\d{4}") & ~D.stock_id.str.startswith("00")].drop_duplicates(["stock_id", "date"], keep="last")
 CL = wide(D, "close"); TV = (CL * wide(D, "volume")).sum(axis=1)                 # 全市場 (4 碼) 成交值
 
 # ---------------- 三大法人 (個股) ----------------
-def wide(df, c):
-    return df.pivot_table(index="date", columns="stock_id", values=c, aggfunc="last")
 I = pd.concat([pd.read_parquet(p).assign(mkt=p.name.split("_")[1]) for p in sorted(FL.glob("inst_*.parquet"))], ignore_index=True)
 I["date"] = pd.to_datetime(I.date); I["stock_id"] = I.stock_id.astype(str).str.strip()
 I = I[I.stock_id.str.fullmatch(r"\d{4}") & ~I.stock_id.str.startswith("00")].drop_duplicates(["date", "stock_id"], keep="last")
@@ -176,7 +179,8 @@ for k in FEATS:
     me = [z.s_r[(q == i) & z.exp.values].mean() for i in range(nq)]
     mv = [z.s_r[(q == i) & ~z.exp.values].mean() for i in range(nq)]
     wv = [(z.s_r[(q == i) & ~z.exp.values] > 0).mean() * 100 for i in range(nq)]
-    sp_e = pd.Series(me).corr(pd.Series(range(nq)), method="spearman"); sp_v = pd.Series(mv).corr(pd.Series(range(nq)), method="spearman")
+    rk = lambda v: pd.Series(v).rank().corr(pd.Series(range(nq), dtype=float))      # Spearman (不用 scipy)
+    sp_e, sp_v = rk(me), rk(mv)
     mono = "同向" if np.sign(sp_e) == np.sign(sp_v) and abs(sp_e) >= 0.7 and abs(sp_v) >= 0.7 else ""
     P(f"| {NAMES[k]} | {' / '.join(f'{x:.2g}' for x in e)} | {' / '.join(f'{x:.2f}' for x in me)} | {' / '.join(f'{x:.2f}' for x in mv)} | "
       f"{' / '.join(f'{x:.0f}' for x in wv)} | {mono} |")
