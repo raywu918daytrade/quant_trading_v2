@@ -116,10 +116,7 @@ def dt_tpex(d):
     """當日沖銷交易統計 (上櫃): 試幾個網址, 取含「成交股數」欄位的表; 連續 5 個交易日都找不到就放棄 (不記成已抓)。"""
     if DT_TPEX_FAIL[0] >= 5: raise StopIteration
     roc = f"{d.year - 1911}/{d:%m/%d}"
-    tries = [("POST", "https://www.tpex.org.tw/www/zh-tw/intraday/stat", {"date": f"{d:%Y/%m/%d}", "response": "json"}),
-             ("POST", "https://www.tpex.org.tw/www/zh-tw/intraday/trading", {"date": f"{d:%Y/%m/%d}", "response": "json"}),
-             ("GET", f"https://www.tpex.org.tw/web/stock/trading/intraday_stat/intraday_trading_stat_result.php?l=zh-tw&d={roc}&o=json", None),
-             ("GET", f"https://www.tpex.org.tw/web/stock/trading/intraday_trading/intraday_trading_list_result.php?l=zh-tw&d={roc}&o=json", None)]
+    tries = [("GET", f"https://www.tpex.org.tw/web/stock/trading/intraday_stat/intraday_trading_stat_result.php?l=zh-tw&d={roc}&o=json", None)]   # 實測只有這個有個股表
     for m, u, data in tries:
         r = get(u, m, tries=1, data=data) if data else get(u, tries=1)
         if r is None: continue
