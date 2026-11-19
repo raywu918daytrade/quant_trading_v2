@@ -11,6 +11,7 @@ import paper_orb as PO
 def get(p): return json.loads(Path(hf_hub_download(HF_REPO, p, repo_type="dataset", force_download=True)).read_text(encoding="utf-8"))
 L, P = get(f"{HF_PREFIX}/live.json"), get(f"{HF_PREFIX}/paper/live.json")
 print("訊號 live.json", L.get("date"), L.get("phase"), L.get("updated_at"), "| 模擬 live.json", P.get("date"), P.get("phase"), P.get("updated_at"))
+print("訊號 note:", L.get("note")); print("模擬 note:", P.get("note"))
 ev = {}
 for e in P.get("events", []):
     if e.get("event") == "SHORT": ev.setdefault(e["stock_id"], e)
