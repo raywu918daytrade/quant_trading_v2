@@ -755,29 +755,28 @@ class Quotes:
         s5 = s5.copy(); ds = now_tw().strftime("%Y-%m-%d"); diff = []; n = 0; late = []; t_start = time.time()
         last_bar = pd.Timestamp(f"{ds} 09:05:00")
         def get(sid):
-            kb = self.api.kbars(self.api.Contracts.Stocks[sid], start=ds, end=ds)
+            c = self.api.Contracts.Stocks[sid]
+            try: kb = self.api.kbars(c, start=ds, end=ds, timeout=RANGE5_CALL_MS)   # 單筆逾時 (預設 30 秒; 11-18 並行時每筆都卡滿 30 秒)
+            except TypeError: kb = self.api.kbars(c, start=ds, end=ds)
             k = pd.DataFrame({**kb}); k["ts"] = pd.to_datetime(k.ts)
             return k, not (len(k) and k.ts.max() >= last_bar)
-        # 2026-11-18 改回逐檔 + 整體期限: 11-18 並行版 (8 執行緒, 卡住 20 秒後逐檔重試, 每檔最多 4 次 × 1.5 秒) 名單 09:07:46 才出來,
-        # 09:05:01~26 的跌破全部晚 2.7 分鐘送單, 模擬單賣在 2% 以下 (台玻 69.4 → 67.9)。11-13 逐檔 77 檔只花約 10 秒。
-        # 先等第一檔的 09:05 那根 K 入庫 (每檔都等是 11-18 慢的原因之一), 其他檔各查一次; 還缺 09:05 那根的最後再補查一次。
-        # 過了 RANGE5_DEADLINE 秒還沒查到的檔, 區間維持快照值 (不讓整份名單等它)。
+        # 2026-11-18 晚: 逐檔 + 整體期限 (11-18 並行版名單 09:07:46 才出來)。
+        # 2026-11-19: 必須在主執行緒同步查。11-19 用背景執行緒 + join 期限, 期限到時背景那筆 kbars 還在跑, 主執行緒接著呼叫
+        # set_order_callback → shioaji「RuntimeError: Already borrowed」, 模擬單整天沒啟動。shioaji 的 api 物件不能讓兩個呼叫同時占用,
+        # 所以改成單筆逾時 RANGE5_CALL_MS + 每筆之前檢查整體期限; 期限到了剩下的檔區間用快照。
         got = {}; t_end = t_start + RANGE5_DEADLINE; sids = list(s5.stock_id)
-        def work():                                       # 一條背景執行緒逐檔查 (不並行); 主執行緒最多等到 t_end, 單一檔卡住也不會拖住名單
-            for i, sid in enumerate(sids):
-                if time.time() >= t_end: return
-                try:
-                    k, is_late = get(sid)
-                    while i == 0 and is_late and time.time() < min(t_end, t_start + 6):
-                        time.sleep(0.5); k, is_late = get(sid)
-                    got[sid] = (k, is_late)
-                except Exception as e: print(f"⚠ {sid} 1 分 K 失敗 ({e}), 區間用快照")
-            for sid in [s for s, (_, lt) in list(got.items()) if lt]:
-                if time.time() >= t_end: return
-                try: got[sid] = get(sid)
-                except Exception: pass
-        th = threading.Thread(target=work, name="range5", daemon=True); th.start(); th.join(max(0.0, t_end - time.time()))
-        got = dict(got)                                   # 期限到了就用已查到的; 背景執行緒之後寫入的不再採用
+        for i, sid in enumerate(sids):
+            if time.time() >= t_end: break
+            try:
+                k, is_late = get(sid)
+                while i == 0 and is_late and time.time() < min(t_end, t_start + 6):   # 只有第一檔等 09:05 那根 K 入庫
+                    time.sleep(0.5); k, is_late = get(sid)
+                got[sid] = (k, is_late)
+            except Exception as e: print(f"⚠ {sid} 1 分 K 失敗 ({e}), 區間用快照")
+        for sid in [s for s, (_, lt) in got.items() if lt]:
+            if time.time() >= t_end: break
+            try: got[sid] = get(sid)
+            except Exception: pass
         skipped = [s for s in sids if s not in got]
         if skipped: print(f"⚠ 1 分 K 超過 {RANGE5_DEADLINE} 秒期限, {len(skipped)} 檔區間用快照: {' '.join(skipped)}")
         for sid in s5.stock_id:
@@ -818,6 +817,7 @@ class Quotes:
 
 
 RANGE5_DEADLINE = 15                                     # 09:05 查 1 分 K 最多花幾秒 (超過的檔區間用快照), 名單不能再拖
+RANGE5_CALL_MS = 3000                                    # 單筆 kbars 逾時 (毫秒)
 
 class TickFeed:
     """永豐逐筆 tick 驅動訊號 (2026-11-12 起)。MIS 快照約每 2 分鐘才更新、成交價常是 "-",
@@ -1047,7 +1047,8 @@ def _run(a, line):
             held = guard("收盤回補", auction, always_line=True) or []
             guard("上傳", lambda: ppub.live(paper_state("等待收盤", f"收盤競價回補 {len(held)} 檔"), force=True)); po.dirty = False; pt["push"] = time.time()
         guard("補單", po.reconcile)                       # 有送單執行緒池: 補送丟進池子並行, 不擋主迴圈
-        if time.time() - pt["sync"] >= 30 and not pt.get("syncing"):   # 對帳 (update_status) 放背景: 11-18 11:35 起每次卡 30 秒逾時, 主迴圈因此每輪 30 秒
+        near_auc = t_auc - pd.Timedelta(seconds=40) <= now_tw() < t_auc + pd.Timedelta(minutes=5)   # 收盤回補前後不對帳: 一筆 update_status 可能占住 api 30 秒
+        if time.time() - pt["sync"] >= 30 and not pt.get("syncing") and not near_auc:   # 對帳 (update_status) 放背景: 11-18 11:35 起每次卡 30 秒逾時, 主迴圈因此每輪 30 秒
             pt["sync"] = time.time(); pt["syncing"] = True
             def bg_sync():
                 try: guard("對帳", po.sync_deals)
