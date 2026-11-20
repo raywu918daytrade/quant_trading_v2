@@ -720,7 +720,10 @@ class Quotes:
     def __init__(self, mis, api=None): self.mis, self.api, self.warned = mis, api, False
 
     def _sj(self, sids):
-        cs = [c for c in (self.api.Contracts.Stocks[s] for s in sids) if c is not None]
+        def con(s):                                      # 永豐沒有的代號 (11-18~20 每天 2867 KeyError) 跳過, 由 snapshot() 用 MIS 補那幾檔; 以前整批改 MIS, 09:02 多花約 1 分鐘
+            try: return self.api.Contracts.Stocks[s]
+            except (KeyError, IndexError): return None
+        cs = [c for c in (con(s) for s in sids) if c is not None]
         ref = {c.code: c for c in cs}; out = []
         for i in range(0, len(cs), 400):                 # 一次最多 500 檔
             for x in self.api.snapshots(cs[i:i + 400]):
