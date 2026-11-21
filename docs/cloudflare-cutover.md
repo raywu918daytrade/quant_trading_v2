@@ -60,6 +60,8 @@ webhook 指到 `*.workers.dev`, 不依賴 just1stock.com 的 DNS, 所以 DNS 出
 
 ## 步驟 b — just1stock.com 的 DNS 從 GoDaddy 搬到 Cloudflare (免費方案)
 
+> **2026-11-21 晚上已執行 (Ray 核准)**: GoDaddy 後台實際有 12 筆, 比外面查到的多一筆 `_railway-verify.watch365` TXT (Railway 驗證, 已一併搬)。轉址未設定。備份: `oracle.k8s/docs/dns/just1stock.com.godaddy-2026-11-21.zone`。Cloudflare 掃描只抓到 4 筆, 其餘用 zone 檔匯入; 匯入預設是橘雲, 已逐筆改成 DNS only, `_domainconnect` 已刪。Cloudflare 指派 `arushi.ns.cloudflare.com` / `bowen.ns.cloudflare.com`, 換之前用 dig 逐筆比對 11 項全部一致。GoDaddy nameserver 已改, 等 .com 登記處生效。GoDaddy 紀錄未刪。
+
 只換 nameserver, 網域註冊留在 GoDaddy。目標是「搬完每個名字解析結果和現在一模一樣」, 所以所有紀錄先設 **DNS only (灰雲)**, 不經 Cloudflare proxy。
 
 ### 2026-11-21 從外面查得到的紀錄 (直接問 `ns53.domaincontrol.com`)
