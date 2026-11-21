@@ -1,0 +1,24 @@
+# Cloudflare Worker fade-web: 網站 (static assets) + LINE 指令機器人 webhook。部署: .github/workflows/cf_web.yml (手動 Run workflow)
+# 搬遷步驟與回復方式: docs/cloudflare-cutover.md。舊的 orb-line-bot (line_bot/wrangler.toml) 在穩定前保留當備援。
+name = "fade-web"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+account_id = "3b43e89a39199fdbf13c0fa4fe4bf93a"   # Ray 的 Cloudflare 帳號 (不是機密), 和 orb-line-bot 同一個
+
+# 網站檔案: build.mjs 把 repo 根的 index.html 與 web/ 複製到 public/ (和 GitHub Pages 同一份, 不另存一份)
+[build]
+command = "node build.mjs"
+watch_dir = ["../web", "../index.html"]
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true          # POST (LINE webhook) 與 /api/* 一律先到 worker.js; GET 再交給 ASSETS
+html_handling = "none"           # 網址和 GitHub Pages 一樣保留 .html (worker.js 自己把結尾 / 補成 index.html)
+not_found_handling = "none"
+
+# 步驟 c (just1stock.com 的 DNS 已在 Cloudflare 之後) 才打開, 見 docs/cloudflare-cutover.md
+# routes = [{ pattern = "fade.just1stock.com", custom_domain = true }]
+
+# secrets (wrangler secret / cf_web.yml 設): LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, LINE_USER_ID
