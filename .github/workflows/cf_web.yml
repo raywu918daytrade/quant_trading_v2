@@ -1,0 +1,77 @@
+name: fade-web deploy
+on:
+  # 部署 fade-web (Cloudflare Worker: 網站 + LINE 指令機器人)。步驟與回復: docs/cloudflare-cutover.md
+  # 現在只能手動 Run workflow。預設只部署 + 測網址, 不動 LINE webhook (舊的 orb-line-bot 照常收訊息)。
+  # set_webhook = true 才把 LINE webhook 改指到 fade-web (cutover 步驟 c2, Ray 核准後才勾)。
+  workflow_dispatch:
+    inputs:
+      set_webhook:
+        description: "把 LINE webhook 改到 fade-web (cutover 步驟 c2)"
+        type: boolean
+        default: false
+  # cutover 步驟 c1 (fade.just1stock.com 綁到 fade-web) 之後打開: 網頁 / bot 改動 push 到 main 就自動部署 (GitHub Pages 不再是正式站)
+  # push:
+  #   branches: [main]
+  #   paths: ["cf_web/**", "line_bot/worker.js", "web/**", "index.html", ".github/workflows/cf_web.yml"]
+concurrency:
+  group: fade-web
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+      LINE_CHANNEL_SECRET: ${{ secrets.LINE_CHANNEL_SECRET }}
+      LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check secrets
+        run: |
+          miss=""; for k in CLOUDFLARE_API_TOKEN LINE_CHANNEL_ACCESS_TOKEN LINE_CHANNEL_SECRET LINE_USER_ID; do [ -z "${!k}" ] && miss="$miss $k"; done
+          [ -n "$miss" ] && { echo "::error::缺少 repo Secrets:$miss"; exit 1; } || true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Validate reply messages with LINE (format check, nothing is sent)
+        run: node line_bot/test/validate.mjs
+      - name: Route tests (pages, webhook = old bot, /api) + LINE validate
+        run: node cf_web/test/routes.mjs
+      - name: Deploy worker
+        id: wr
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          wranglerVersion: "4.159.0"   # 本機 wrangler dev 測過的版本 (static assets + run_worker_first)
+          workingDirectory: cf_web
+          secrets: |
+            LINE_CHANNEL_ACCESS_TOKEN
+            LINE_CHANNEL_SECRET
+            LINE_USER_ID
+      - name: Smoke test deployed URL
+        id: smoke
+        env:
+          DEPLOY_URL: ${{ steps.wr.outputs.deployment-url }}
+          WR_OUT: ${{ steps.wr.outputs.command-output }}
+        run: |
+          URL="$DEPLOY_URL"; [ -z "$URL" ] && URL=$(echo "$WR_OUT" | grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' | head -1)
+          [ -z "$URL" ] && { echo "::error::抓不到 worker 網址"; exit 1; }
+          URL="${URL%/}"; echo "url=$URL" >> "$GITHUB_OUTPUT"; echo "worker: $URL"
+          sleep 5; bad=0
+          chk() { got=$(curl -s -o /dev/null -w "%{http_code}" -X "$1" "$URL$2"); [ "$got" = "$3" ] && echo "✓ $1 $2 $got" || { echo "✗ $1 $2 $got (要 $3)"; bad=1; }; }
+          for p in / /index.html /web/ /web/index.html /web/today.html "/web/chart.html?d=2026-11-20&s=2603" /api/health /api/hf/live.json; do chk GET "$p" 200; done
+          for p in /CNAME /README.md /scripts/orb_live.py; do chk GET "$p" 404; done
+          chk POST / 401   # 沒簽章 → 401 = webhook 有接到 bot
+          exit $bad
+      - uses: actions/setup-python@v5
+        if: inputs.set_webhook
+        with:
+          python-version: "3.12"
+      - name: Point LINE webhook at fade-web (cutover c2)
+        if: inputs.set_webhook
+        env:
+          URL: ${{ steps.smoke.outputs.url }}
+        run: |
+          pip install -q requests
+          python3 line_bot/setup_line.py webhook "$URL/"
